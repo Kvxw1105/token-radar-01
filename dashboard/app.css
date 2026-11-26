@@ -17,6 +17,8 @@
   --mono:ui-monospace,'SF Mono','Cascadia Mono',Menlo,Consolas,'Liberation Mono',monospace;
 }
 *{box-sizing:border-box}
+[hidden]{display:none!important}
+html{scroll-padding-top:40px}
 body{
   margin:0;
   background:radial-gradient(1100px 480px at 72% -100px,#0e1d33 0%,var(--bg) 62%) fixed,var(--bg);
@@ -74,8 +76,8 @@ p{margin:6px 0}
   background:rgba(77,141,255,.08)}
 
 /* controls */
-.controls{display:flex;flex-wrap:wrap;align-items:center;gap:2px 6px;margin:2px 0;
-  padding:2px 6px;border:1px solid var(--line);background:var(--panel)}
+.controls{display:flex;flex-wrap:wrap;align-items:center;gap:3px 6px;margin:2px 0 4px;
+  padding:3px 6px;border:1px solid var(--line);background:var(--panel)}
 .sorts{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
 .lbl{color:var(--dim);font-size:11px}
 button{font:inherit;cursor:pointer}
@@ -94,27 +96,35 @@ select{font:inherit;font-size:11px;padding:2px 3px;background:var(--bg2);color:v
 .twrap{scrollbar-width:thin}
 .ltable{width:100%;border-collapse:collapse;font-size:12px}
 .ltable th{position:sticky;top:0;z-index:1;background:var(--raise);color:var(--tx2);font-weight:600;
-  font-size:11px;line-height:1.25;text-align:left;padding:2px 5px;border-bottom:1px solid var(--line2);white-space:nowrap}
-.ltable td{padding:2px 5px;line-height:1.4;border-bottom:1px solid var(--line);vertical-align:top}
-.ltable td:first-child{white-space:nowrap}
+  font-size:11px;line-height:1.25;text-align:left;padding:3px 5px;border-bottom:1px solid var(--line2);white-space:nowrap}
+.ltable td{padding:2px 5px;line-height:1.4;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap}
+.ltable td.rk{text-align:left}
+.rkn{color:var(--tx);font-weight:600}
+.rkb{color:var(--dim);font-size:10px}
 tr.row{cursor:pointer}
 tr.row:hover{background:var(--raise)}
 tr.row.on{background:var(--acc-dim);box-shadow:inset 2px 0 0 var(--acc)}
 .nm{color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px}
 .sl{color:var(--dim);font-size:11px;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap;max-width:170px}
-.chip{display:inline-block;padding:1px 8px;border-radius:999px;background:var(--bg2);
-  border:1px solid var(--line2);color:var(--tx2);font-size:11px;white-space:nowrap}
+.chip{display:inline-block;padding:1px 7px;border-radius:999px;background:var(--bg2);
+  border:1px solid var(--line2);color:var(--tx2);font-size:11px;white-space:nowrap;vertical-align:middle}
 .c{text-align:center}
-/* numeric columns: rank/chain count/confidence centered, values right-aligned */
-.ltable th:nth-child(1),.ltable td:nth-child(1),
-.ltable th:nth-child(4),.ltable td:nth-child(4),
-.ltable th:nth-child(8),.ltable td:nth-child(8){text-align:center}
-.ltable th:nth-child(5),.ltable td:nth-child(5),
-.ltable th:nth-child(6),.ltable td:nth-child(6),
-.ltable th:nth-child(7),.ltable td:nth-child(7),
-.ltable th:nth-child(9),.ltable td:nth-child(9){text-align:right}
-.band{color:var(--tx2);font-size:11px}
+/* board table (11 cols): rank/name/cat left, status/chains/conf centered, numeric values right-aligned */
+#boardwrap .ltable th:nth-child(4),#boardwrap .ltable td:nth-child(4),
+#boardwrap .ltable th:nth-child(5),#boardwrap .ltable td:nth-child(5),
+#boardwrap .ltable th:nth-child(9),#boardwrap .ltable td:nth-child(9){text-align:center}
+#boardwrap .ltable th:nth-child(6),#boardwrap .ltable td:nth-child(6),
+#boardwrap .ltable th:nth-child(7),#boardwrap .ltable td:nth-child(7),
+#boardwrap .ltable th:nth-child(8),#boardwrap .ltable td:nth-child(8),
+#boardwrap .ltable th:nth-child(10),#boardwrap .ltable td:nth-child(10),
+#boardwrap .ltable th:nth-child(11),#boardwrap .ltable td:nth-child(11){text-align:right}
+/* live comparison table (5 cols): name/cat left, TVL/mcap/multiple right-aligned */
+#livewrap .ltable th:nth-child(3),#livewrap .ltable td:nth-child(3),
+#livewrap .ltable th:nth-child(4),#livewrap .ltable td:nth-child(4),
+#livewrap .ltable th:nth-child(5),#livewrap .ltable td:nth-child(5){text-align:right}
+#livewrap .ltable .nm{max-width:260px}
+.band{color:var(--tx2);font-size:10.5px}
 .conf{display:inline-block;padding:1px 7px;border-radius:3px;font-size:11px;border:1px solid}
 .conf.high{color:var(--acc);border-color:var(--acc);background:var(--acc-dim)}
 .conf.medium{color:var(--warn);border-color:var(--warn);background:rgba(255,180,84,.12)}
@@ -151,17 +161,18 @@ tr.row.on{background:var(--acc-dim);box-shadow:inset 2px 0 0 var(--acc)}
   font-size:11px;line-height:1.3;color:var(--tx2)}
 .pchips span:last-child{color:var(--acc);border-color:var(--acc)}
 
-/* full-plan view (#plan=slug): 11px step cards, two balanced columns, fits 720x400 */
-.plan{max-width:720px;margin:0 auto;padding:0 8px}
-.plan-head{text-align:center;font-size:12px;line-height:17px}
-.plan-head b{font-size:13px}
-.plan-chips{font-size:11px;justify-content:center;margin-top:1px}
-.plan-conf{text-align:center;font-size:11px;line-height:15px}
-.plan-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px 6px;margin-top:2px}
-.plan-step{border:1px solid var(--line);border-radius:6px;padding:1px 6px;background:var(--bg2);
-  font-size:11px;line-height:1.22;break-inside:avoid}
-.plan-step b{color:var(--acc);margin-right:4px}
-.plan-counter{font-size:11px;line-height:1.3;margin:2px 0 0;padding:1px 8px}
+/* full-plan view (#plan=slug): balanced two-column grid with full-width final odd card, fits 720x400 */
+.plan{max-width:720px;margin:4px auto 0;padding:0 4px}
+.plan-head{display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap;font-size:12px;line-height:1.4}
+.plan-head b{font-size:14px;color:var(--tx)}
+.plan-chips{font-size:11px;justify-content:center;gap:6px;margin-top:6px}
+.plan-conf{text-align:center;font-size:11.5px;line-height:1.4;margin-top:6px;color:var(--tx2)}
+.plan-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 10px;margin-top:8px}
+.plan-step{border:1px solid var(--line2);border-radius:6px;padding:7px 10px;background:var(--panel);
+  font-size:11.5px;line-height:1.45;break-inside:avoid}
+.plan-step:last-child:nth-child(odd){grid-column:1/-1}
+.plan-step b{color:var(--acc);margin-right:5px}
+.plan-counter{font-size:11.5px;line-height:1.4;margin:8px 0 0;padding:5px 10px}
 
 /* scatter */
 #scatter svg{display:block;width:100%;height:auto;background:var(--panel);border:1px solid var(--line)}
@@ -212,10 +223,30 @@ tr.row.on{background:var(--acc-dim);box-shadow:inset 2px 0 0 var(--acc)}
   .board{grid-template-columns:1fr}
   .twrap,.detail{max-height:520px}
   .cards{grid-template-columns:1fr}
+  #boardwrap .ltable{font-size:11px}
+  #boardwrap .ltable th,#boardwrap .ltable td{padding:2px 3px}
+  #boardwrap .ltable th{font-size:10.5px}
+  #boardwrap .nm{max-width:104px}
+  #boardwrap .chip{padding:1px 4px;font-size:10px;max-width:82px;overflow:hidden;text-overflow:ellipsis}
+  #boardwrap .rkb{font-size:9px}
+  #boardwrap .band{font-size:10px}
+  #boardwrap .conf{padding:0 5px;font-size:10px}
 }
 
 /* Three-lane banner */
-.banner{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;margin:6px 0;border:1px solid #2a3040;border-radius:6px;background:#0f1420;font-size:12px;position:sticky;top:0;z-index:5}
+.banner{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:5px 10px;margin:4px 0 6px;border:1px solid var(--line2);border-radius:6px;background:#0f1420;box-shadow:0 5px 0 0 var(--bg),0 -4px 0 4px var(--bg);font-size:12px;position:sticky;top:0;z-index:5}
 .banner .bn{padding:2px 6px;border-radius:4px;background:#1a2030}
 .banner .bn.acc{background:#1f3a2a;color:#2ce5a7}
 .banner .ba{opacity:.6}
+
+/* Decision map and evidence */
+.quadrants{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.quadrant{background:var(--panel);border:1px solid var(--line2);padding:9px 12px;font-size:12px}
+.quadrant small{display:block;color:var(--dim)}
+.quadrant strong{display:block;color:var(--acc);font-size:15px;margin:2px 0}
+.quadrant strong span{float:right;color:var(--tx)}
+.map-note{font-size:11px;color:var(--dim);line-height:1.5}
+.verdict{font-size:10px;min-width:115px}
+.decision-detail{font-size:11px;line-height:1.4;border-left:2px solid var(--acc);padding:1px 10px;margin:6px 0;background:var(--panel)}
+.decision-detail p{margin:3px 0}
+.decision-detail b{color:var(--acc)}

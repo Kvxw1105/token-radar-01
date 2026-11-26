@@ -426,10 +426,16 @@ function fundStep(builder: StepBuilder, row: FarmRow, floorUsd: number, capital:
   const chainCount = integer(builder, row.chains.length);
   const rank = integer(builder, row.rank);
   const capHint = thin ? `（试探仓上限 ${usd(builder, 50)}）` : '';
-  const text =
-    `${start}用全新钱包为 ${name} 在 ${chain} 建仓，投入 ${usd(builder, capital)}（估计）${capHint}，榜单第 ${rank} 位；` +
-    `该协议覆盖 ${chainCount} 条链，TVL ${usd(builder, row.tvl_usd)}，${floorDistance(builder, row.tvl_usd, floorUsd)}。` +
-    `成本：本金 ${usd(builder, capital)} 计入占用，开户 gas 约 ${usd(builder, gas)}（估计）；耗时 15 分钟。`;
+  const tvl = usd(builder, row.tvl_usd);
+  const amount = usd(builder, capital);
+  const distance = floorDistance(builder, row.tvl_usd, floorUsd);
+  const opening = pick(builder.slug, 101, [
+    `${start}用全新钱包为 ${name} 在 ${chain} 建仓，投入 ${amount}（估计）${capHint}，榜单第 ${rank} 位；覆盖 ${chainCount} 条链，TVL ${tvl}，${distance}`,
+    `榜单第 ${rank} 位的 ${name} 覆盖 ${chainCount} 条链，TVL ${tvl}，${distance}；用全新钱包在 ${chain} 投入 ${amount} 建仓（估计）${capHint}`,
+    `在 ${chain} 用全新钱包建立 ${name} 仓位：投入 ${amount}（估计）${capHint}；当前 TVL ${tvl}，${distance}，排名第 ${rank}，覆盖 ${chainCount} 条链`,
+    `${name} 的 TVL 为 ${tvl}，${distance}；${start}从 ${chain} 用全新钱包投入 ${amount}（估计）${capHint}，其排名第 ${rank}，覆盖 ${chainCount} 条链`,
+  ]);
+  const text = `${opening}。成本：本金 ${amount} 计入占用，开户 gas 约 ${usd(builder, gas)}（估计）；耗时 15 分钟。`;
   addStep(builder, text);
 }
 
@@ -512,10 +518,15 @@ function secondPoolStep(builder: StepBuilder, row: FarmRow, capital: number, gas
   const rotate = pick(builder.slug, index, ['轮换', '挪动', '转移', '调整'] as const);
   const half = round(capital / 2);
   const name = nameOf(builder, row);
-  const text =
-    `在 ${name} 应用内查看可用的第二个池：把约 ${usd(builder, half)} 从主仓${rotate}到第二个池，` +
-    `或增加一个稳定币交易对；以应用实际列出的池为准。` +
-    `成本：本金 ${usd(builder, half)} 继续占用，gas 约 ${usd(builder, gas)}（估计）；耗时 20 分钟。`;
+  const amount = usd(builder, half);
+  const tvl = usd(builder, row.tvl_usd);
+  const action = pick(builder.slug, 102, [
+    `TVL ${tvl}；在 ${name} 查看第二个池，把约 ${amount} 从主仓${rotate}过去，或增加稳定币交易对`,
+    `从 ${name} 的主仓${rotate}约 ${amount} 到另一池，或增加稳定币交易对；当前 TVL ${tvl}`,
+    `先查看 ${name} 可用池，再将主仓约 ${amount} 配到第二池或稳定币交易对；TVL 为 ${tvl}`,
+    `以 TVL ${tvl} 为参考，在 ${name} 增加稳定币交易对，或从主仓${rotate}约 ${amount} 至第二池`,
+  ]);
+  const text = `${action}；以应用实际列出的池为准。成本：本金 ${amount} 继续占用，gas 约 ${usd(builder, gas)}（估计）；耗时 20 分钟。`;
   addStep(builder, text);
 }
 
@@ -542,22 +553,26 @@ function recurStep(builder: StepBuilder, row: FarmRow, capital: number, gas: num
   addStep(builder, text);
 }
 
-function hygieneStep(builder: StepBuilder): void {
+function hygieneStep(builder: StepBuilder, row: FarmRow): void {
   const variants = [
     '快照卫生：把操作分散到不同日期与时段，保留钱包、日期和每笔交易的农场日志，避免同一地址高频对倒等洗量式行为，也绝不为领取付费。成本：不产生额外费用；耗时 5 分钟。',
     '操作卫生：分散不同日期与时段执行，记录钱包、日期与每笔交易，避免高频对倒与洗量；绝不为领取付费。成本：无额外费用；耗时 5 分钟。',
     '记录与分散：在不同日期与时段操作，保留钱包、日期和交易日志，避免同一地址高频对倒；绝不为领取付费。成本：不产生额外费用；耗时 5 分钟。',
   ];
   const text = variants[fnv1a(builder.slug) % variants.length]!;
-  addStep(builder, text);
+  addStep(builder, text.replace('成本：', `参考拥挤度 ${fixed(builder, row.crowding, 1)}×，TVL ${usd(builder, row.tvl_usd)}。成本：`));
 }
 
 function exitStep(builder: StepBuilder, row: FarmRow, capital: number, gas: number): void {
   const name = nameOf(builder, row);
+  const tvl = usd(builder, row.tvl_usd);
+  const amount = usd(builder, capital);
+  const fee = usd(builder, gas);
   const variants = [
-    `退出与领取：只从 ${name} 自己发布的页面提现或领取；若官方宣布代币上线，再核对领取窗口与资格，不向任何私信链接付款。成本：链上 gas 约 ${usd(builder, gas)}（估计），本金 ${usd(builder, capital)} 取回；耗时 15 分钟。`,
-    `领取与退出：仅通过 ${name} 官方页面提现或领取；代币上线后核对领取窗口与资格，不向任何私信链接付款。成本：链上 gas 约 ${usd(builder, gas)}（估计），本金 ${usd(builder, capital)} 取回；耗时 15 分钟。`,
-    `提现与领取：只在 ${name} 自己发布的页面操作；官方宣布代币上线后再核对领取窗口与资格，不向任何私信链接付款。成本：链上 gas 约 ${usd(builder, gas)}（估计），本金 ${usd(builder, capital)} 取回；耗时 15 分钟。`,
+    `退出与领取：参考当前 TVL ${tvl}，只从 ${name} 官方页面提现或领取；代币上线后核对窗口与资格，不向私信链接付款。成本：gas 约 ${fee}（估计），取回本金 ${amount}；耗时 15 分钟。`,
+    `领取与退出：${name} 的 TVL 为 ${tvl}；仅通过官方页面操作，确认上线后的领取窗口与资格，勿向私信链接付款。成本：取回本金 ${amount}，gas 约 ${fee}（估计）；耗时 15 分钟。`,
+    `提现前查看 ${name} 官方公告及资格，当前 TVL ${tvl}；领取只走官方页面，拒绝私信付款。成本：本金 ${amount} 取回，gas 约 ${fee}（估计）；耗时 15 分钟。`,
+    `待 ${name} 官方宣布上线后核对资格和领取窗口；TVL ${tvl}，退出及领取均使用官方页面，切勿向私信付款。成本：gas 约 ${fee}（估计），本金 ${amount} 取回；耗时 15 分钟。`,
   ];
   const text = variants[fnv1a(builder.slug + 'exit') % variants.length]!;
   addStep(builder, text);
@@ -590,11 +605,14 @@ function closingStep(
   const excess = absurd
     ? `注意：投入超过协议 TVL，份额已按 ${fixed(builder, 100, 2)}% 上限展示，仓位会超过协议 TVL。`
     : '';
-  const text =
-    `闭环测算：投入 ${capitalText} ÷ TVL ${tvlText} = 份额 ${share}% × 估值带 ${lo}–${hi} → ` +
-    `市值暴露参考 ${al}–${ah}（share×band，仅参考量，非空投承诺）。` +
-    `情景（假设该协议将总供应量 ${integer(builder, scenarioPct)}% 分配给参与者，可改）：${sl}–${sh}。` +
-    `${excess}成本：无额外费用；耗时：即时。`;
+  const scenario = integer(builder, scenarioPct);
+  const variants = [
+    `闭环测算：投入 ${capitalText} ÷ TVL ${tvlText} = 份额 ${share}% × 估值带 ${lo}–${hi} → 市值暴露参考 ${al}–${ah}（share×band，仅参考量，非空投承诺）。情景（假设该协议将总供应量 ${scenario}% 分配给参与者，可改）：${sl}–${sh}。`,
+    `闭环测算：TVL ${tvlText} 中投入 ${capitalText}，份额为 ${share}%；按估值带 ${lo}–${hi} 推算市值暴露 ${al}–${ah}，仅供参考，非空投承诺。若参与者分配总供应量 ${scenario}%（假设，可改），情景为 ${sl}–${sh}。`,
+    `闭环测算：估值带 ${lo}–${hi} 乘以投入 ${capitalText} 占 TVL ${tvlText} 的份额 ${share}%，得到市值暴露 ${al}–${ah}，非空投承诺。假设参与者获总供应量 ${scenario}%（可改），情景 ${sl}–${sh}。`,
+    `闭环测算：市值暴露参考 ${al}–${ah}，由 ${capitalText} ÷ TVL ${tvlText} 得到的 ${share}% 份额乘估值带 ${lo}–${hi}；这不是空投承诺。总供应量分配给参与者 ${scenario}% 的假设可改，对应情景 ${sl}–${sh}。`,
+  ];
+  const text = pick(builder.slug, 103, variants) + `${excess}成本：无额外费用，测算基于 TVL ${tvlText}；耗时：即时。`;
   addStep(builder, text);
 }
 
@@ -679,17 +697,28 @@ export function buildFarmPlan(row: FarmRow, floorUsd: number): FarmPlan {
     const p90 = integer(builder, row.rank_p90 ?? row.rank);
     const width = integer(builder, Math.max(1, (row.rank_p90 ?? row.rank) - (row.rank_p10 ?? row.rank)));
     const fd = floorDistance(builder, row.tvl_usd, floorUsd);
-    addStep(
-      builder,
-      `不做理由：拥挤度 ${crowding}×（估值/TVL），7 日变化 ${change}，${fd}；排名区间 #${p10}–#${p90} 宽度 ${width} 名，暂不建仓。耗时：即时。`,
-    );
+    const tvl = usd(builder, row.tvl_usd);
+    const reasons = [
+      `不做理由：拥挤度 ${crowding}×，7 日变化 ${change}，${fd}；排名区间 #${p10}–#${p90} 宽 ${width} 名，暂不建仓`,
+      `不做理由：排名 #${p10}–#${p90} 相差 ${width} 名；TVL ${tvl}，${fd}，拥挤度 ${crowding}×，先观望`,
+      `不做理由：先观望，TVL ${tvl} 且 ${fd}；7 日变化 ${change}，排名区间宽 ${width} 名，拥挤度 ${crowding}×`,
+      `不做理由：${fd}，拥挤度 ${crowding}×；排名从 #${p10} 到 #${p90}，宽 ${width} 名，暂缓投入`,
+      `不做理由：7 日变化 ${change}，TVL ${tvl}；结合拥挤度 ${crowding}× 和 ${width} 名排名区间，暂不建仓`,
+      `不做理由：排名区间宽 ${width} 名（#${p10}–#${p90}），${fd}；当前拥挤度 ${crowding}×，维持观察`,
+    ];
+    addStep(builder, pick(builder.slug, 104, reasons) + '。耗时：即时。');
     // 触发阈值须相对本行数据，否则对大 TVL 行已然满足、无意义。
     const triggerTvl = usd(builder, row.tvl_usd > 0 ? row.tvl_usd * 1.5 : floorUsd);
-    const triggerWidth = Math.max(10, Math.ceil(width * 0.5));
-    addStep(
-      builder,
-      `重估触发：TVL 回升至 ${triggerTvl} 以上、官方激励/空投确认、或排名区间收窄至 ${integer(builder, triggerWidth)} 名内时重新评估。耗时：即时。`,
-    );
+    const triggerWidth = integer(builder, Math.max(10, Math.ceil(Number(width) * 0.5)));
+    const triggers = [
+      `重估触发：TVL 回升至 ${triggerTvl} 以上、官方激励/空投确认、或排名区间收窄至 ${triggerWidth} 名内时重新评估`,
+      `重估触发：若排名区间缩至 ${triggerWidth} 名内，或 TVL 超过 ${triggerTvl}，或官方确认激励/空投，再评估`,
+      `重估触发：等待官方确认激励/空投；也可在 TVL 高于 ${triggerTvl} 或排名区间收窄到 ${triggerWidth} 名内后复查`,
+      `重估触发：当前 TVL ${tvl}，升至 ${triggerTvl} 以上时复查；官方确认激励/空投或排名区间缩至 ${triggerWidth} 名内亦可触发`,
+      `重估触发：排名宽度由 ${width} 名收窄至 ${triggerWidth} 名内时复核；TVL 超过 ${triggerTvl} 或官方确认激励/空投也可重估`,
+      `重估触发：重新评估需看到 TVL 超过 ${triggerTvl}，或官方确认激励/空投，或排名区间压缩到 ${triggerWidth} 名内`,
+    ];
+    addStep(builder, pick(builder.slug, 105, triggers) + '。耗时：即时。');
     closingStep(builder, capital, row.tvl_usd, rawSharePct, row.band_lo, row.band_hi, airdropLo, airdropHi, absurd, scenarioPct, scenarioLo, scenarioHi);
   } else {
     fundStep(builder, row, floorUsd, capital, gas, thin);
@@ -700,7 +729,7 @@ export function buildFarmPlan(row: FarmRow, floorUsd: number): FarmPlan {
       borrowStep(builder, row, capital, gas);
     }
     recurStep(builder, row, capital, gas);
-    hygieneStep(builder);
+    hygieneStep(builder, row);
     exitStep(builder, row, capital, gas);
     closingStep(builder, capital, row.tvl_usd, rawSharePct, row.band_lo, row.band_hi, airdropLo, airdropHi, absurd, scenarioPct, scenarioLo, scenarioHi);
   }

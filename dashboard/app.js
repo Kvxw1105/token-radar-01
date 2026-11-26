@@ -60,6 +60,9 @@ function tierOf(tvl) {
   return tvl < 1e7 ? 0 : tvl < 1e8 ? 1 : tvl < 1e9 ? 2 : 3;
 }
 
+const verdictLabel = (r) => r.verdict === 'FARM' ? 'FARM · 优先研究（可小仓）' : r.verdict === 'THIN' ? 'THIN · 先验证（不重仓）' : r.confidence.level === 'low' ? 'SKIP · 证据不足（暂不投入）' : 'SKIP · 明确不做';
+const tokenLabel = (r) => ({issued:'已发币', issued_no_mcap:'已发币·无市值', uncertain:'不确定', unissued_snapshot:'快照未记录'})[r.token_status] || '快照未记录';
+
 const CONF_LABEL = { high: '高', medium: '中', low: '低' };
 
 // Factor keys in display order with Chinese labels (factors are log10 contributions).
@@ -170,6 +173,7 @@ function init(R) {
     renderHead();
     renderBanner();
     renderHero();
+    renderMap();
     renderHeat();
     const pre = state.tab === 'pre';
     document.getElementById('pre-controls').hidden = !pre;
@@ -239,6 +243,24 @@ function init(R) {
     document.getElementById('hstab').textContent = R.stability_note;
   }
 
+  function renderMap() {
+    const ratios = rows.map(r => r.implied_value_usd / r.tvl_usd).sort((a, b) => a - b);
+    const mid = (ratios[(ratios.length - 1) >> 1] + ratios[ratios.length >> 1]) / 2;
+    const widths = rows.map(r => r.rank_p90 - r.rank_p10).sort((a, b) => a - b);
+    const wmid = (widths[(widths.length - 1) >> 1] + widths[widths.length >> 1]) / 2;
+    const groups = [[], [], [], []];
+    for (const r of rows) {
+      const attractive = r.implied_value_usd / r.tvl_usd >= mid;
+      const reliable = r.confidence.level !== 'low' && r.rank_p90 - r.rank_p10 <= wmid;
+      groups[(attractive ? 0 : 2) + (reliable ? 0 : 1)].push(r);
+    }
+    const names = ['优先研究', '先验证', '有据但不优先', '暂不投入'];
+    document.getElementById('quadrants').innerHTML = groups.map((g, i) => {
+      const top = g.sort((a, b) => b.implied_value_usd - a.implied_value_usd || a.slug.localeCompare(b.slug)).slice(0, 3);
+      return `<div class="quadrant"><small>${i < 2 ? '高吸引力' : '低吸引力'} / ${i % 2 ? '低可靠性' : '高可靠性'}</small><strong>${names[i]} <span class="num">${g.length} 行</span></strong><div>估值 Top 3：${top.map(r => esc(r.name)).join('、') || '—'}</div></div>`;
+    }).join('');
+  }
+
   // Chain × category heatmap: top 6 chains × top 6 categories, opacity ∝ TVL share.
   function renderHeat() {
     const cells = R.heatmap;
@@ -276,7 +298,7 @@ function init(R) {
         const sym = r.symbol ? ` <span class="sl">${esc(r.symbol)}</span>` : '';
         return (
           `<tr>` +
-          `<td><div class="nm">${esc(r.name)}</div>${sym}</td>` +
+          `<td><div class="nm">${esc(r.name)}${sym}</div></td>` +
           `<td><span class="chip">${esc(r.category || '未分类')}</span></td>` +
           `<td class="num">${fmtUsd(r.tvl_usd)}</td>` +
           `<td class="num">${fmtUsd(r.mcap_usd)}</td>` +
@@ -293,19 +315,21 @@ function init(R) {
         const cls = chg === null || !Number.isFinite(chg) ? '' : chg >= 0 ? ' up' : ' dn';
          const ts = r.token_status || 'unissued_snapshot';
          const tsLabel = ts === 'issued' ? '已发币' : ts === 'issued_no_mcap' ? '已发币·无市值' : ts === 'uncertain' ? '不确定' : '快照未记录';
+         const cat = r.category || '未分类';
          const delta = (r.tvl_rank || r.rank) - r.rank;
          const deltaHtml = delta > 0 ? `<span class="up">▲${delta}</span>` : delta < 0 ? `<span class="dn">▼${-delta}</span>` : `<span class="dim">—</span>`;
          return (
            `<tr class="row${r.slug === state.sel ? ' on' : ''}" data-s="${esc(r.slug)}">` +
-           `<td class="num c dim">${r.rank}（P10–P90：${r.rank_p10}–${r.rank_p90}）</td>` +
+           `<td class="num rk"><span class="rkn">${r.rank}</span><span class="rkb">（样本重采样排名波动区间：${r.rank_p10}–${r.rank_p90}）</span></td>` +
            `<td title="${esc(r.slug)}"><div class="nm">${esc(r.name)}</div></td>` +
-           `<td><span class="chip">${esc(r.category || '未分类')}</span></td>` +
+           `<td><span class="chip" title="${esc(cat)}">${esc(cat)}</span></td>` +
            `<td><span class="chip">${esc(tsLabel)}</span></td>` +
            `<td class="num c">${r.chains.length}</td>` +
            `<td class="num">${fmtUsd(r.tvl_usd)}</td>` +
            `<td class="num${cls}">${fmtChange(chg)}</td>` +
            `<td class="num"><b>${fmtUsd(r.implied_value_usd)}</b> <span class="band">${fmtUsd(r.band_lo, 1)}–${fmtUsd(r.band_hi, 1)}</span></td>` +
            `<td><span class="conf ${r.confidence.level}">${CONF_LABEL[r.confidence.level]}</span></td>` +
+           `<td class="verdict">${esc(verdictLabel(r))}</td>` +
            `<td class="num">${fmtX(r.crowding)}</td>` +
            `<td class="num">${deltaHtml}</td></tr>`
          );
@@ -351,7 +375,7 @@ function init(R) {
       `<span class="chip">${esc(r.category || '未分类')}</span>` +
       `<span class="badge ${r.on_watchlist ? 'acc' : 'early'}">${r.on_watchlist ? 'Watchlist' : '地板以下'}</span></div>` +
       `<div class="dch"><span class="dim">链：</span>${r.chains.map(esc).join('、')}</div>` +
-      `<div class="dch"><span class="dim">排名稳定性：</span><span class="num">${r.rank}（P10–P90：${r.rank_p10}–${r.rank_p90}） · 三模型中位 #${r.median_model_rank}</span></div>` +
+      `<div class="dch"><span class="dim">名次 / 样本重采样排名波动区间：</span><span class="num">#${r.rank}（${r.rank_p10}–${r.rank_p90}） · 三模型中位 #${r.median_model_rank}</span></div>` +
       `<div class="dnums">` +
       `<span>TVL <b>${fmtUsd(r.tvl_usd)}</b></span>` +
       `<span>7日 <b>${fmtChange(r.change_7d)}</b></span>` +
@@ -363,7 +387,7 @@ function init(R) {
       `<h3>因子分解（log10，× = 10^x）</h3><div class="factors">${factorRows}</div>` +
        `<h3>可比锚点（同类已发币，按 log TVL 最近）</h3><table class="ctable"><tr><th>名称</th><th>TVL</th><th>市值</th><th>市值/TVL</th></tr>${comps}</table>` +
       `<div class="counter">反证：${esc(r.counter)}</div>` +
-      `<div class="counter">农场判定：${esc(p.verdict || 'FARM')} · 停止条件：${esc(p.stop_condition || '')} · 投 $100 回本需分配 ${( (p.break_even_share_pct && p.break_even_share_pct.low) || 0).toFixed(6)}%（低/中/高三档 ${( (p.break_even_share_pct && p.break_even_share_pct.low) || 0).toFixed(6)}% / ${( (p.break_even_share_pct && p.break_even_share_pct.mid) || 0).toFixed(6)}% / ${( (p.break_even_share_pct && p.break_even_share_pct.high) || 0).toFixed(6)}%）</div>` +
+      `<div class="counter">农场判定：${esc(verdictLabel(r))} · 停止条件：${esc(p.stop_condition || '')} · 投 $100 回本需分配 ${( (p.break_even_share_pct && p.break_even_share_pct.low) || 0).toFixed(6)}%（低/中/高三档 ${( (p.break_even_share_pct && p.break_even_share_pct.low) || 0).toFixed(6)}% / ${( (p.break_even_share_pct && p.break_even_share_pct.mid) || 0).toFixed(6)}% / ${( (p.break_even_share_pct && p.break_even_share_pct.high) || 0).toFixed(6)}%）</div>` +
       `<h3>农场计划</h3><ol class="steps">${p.steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>` +
       `<div class="pchips num"><span>投入 ${fmtUsd(p.capital_usd)}</span>` +
       `<span>÷ TVL ${fmtUsd(r.tvl_usd, 1)}</span>` +
@@ -454,15 +478,15 @@ function init(R) {
       row('d（动量系数）', m.d.toFixed(4)) +
       row('动量 winsor 区间', `${m.winsor_lo.toFixed(2)}% … ${m.winsor_hi.toFixed(2)}%`) +
       row('全局 R²', m.global_r2.toFixed(4)) +
-      row(`影子回测 n=${bt.n} · 中位 log 误差`, bt.median_log_err.toFixed(4)) +
-      row('回测 log 误差 P25 / P75', `${bt.q25_log_err.toFixed(3)} / ${bt.q75_log_err.toFixed(3)}`) +
       row('|log 误差| ≤ log10(3)（3× 内）占比', fmtShare(bt.within_3x_share)) +
       row('P25–P75 带覆盖率（校准前）', fmtShare(cal.before_coverage)) +
-      row('P25–P75 带覆盖率（校准后）', fmtShare(cal.after_coverage)) +
+      row('P25–P75 带覆盖率（校准后；须与带宽一起看）', fmtShare(cal.after_coverage)) +
+      row(`影子回测 n=${bt.n} · 中位偏差（带符号）`, bt.median_log_err.toFixed(4)) +
+      row('回测 log 误差 P25 / P75', `${bt.q25_log_err.toFixed(3)} / ${bt.q75_log_err.toFixed(3)}`) +
       row('估值带校准系数 s', cal.coefficient.toFixed(4)) +
        row('Spearman ρ（只报告不设阈）', R.spearman.rho.toFixed(4)) +
-       (R.baselines || []).map((b) => row(b.name + ' · OOF 覆盖率', b.backtest.band_coverage.toFixed(4)) + row(b.name + ' · OOF 中位 log 误差', b.backtest.median_log_err.toFixed(4))).join('') +
-       (R.ablations || []).map((a) => row(a.name + ' · OOF 中位 log 误差', a.median_log_err.toFixed(4))).join('');
+       (R.baselines || []).map((b) => row(b.name + ' · OOF 覆盖率', b.backtest.band_coverage.toFixed(4)) + row(b.name + ' · OOF 中位偏差（带符号）', b.backtest.median_log_err.toFixed(4))).join('') +
+       (R.ablations || []).map((a) => row(a.name + ' · OOF 中位偏差（带符号）', a.median_log_err.toFixed(4))).join('');
     document.getElementById('mcal').textContent = `校准方法：${cal.method}`;
     document.getElementById('mtop10').innerHTML = R.spearman.top10.map((s) => `<li>${esc(s)}</li>`).join('');
     document.getElementById('mcats').innerHTML = m.categories
@@ -565,10 +589,14 @@ function init(R) {
       `<div class="plan-conf">置信 ` +
       `<span class="conf ${row.confidence.level}">${CONF_LABEL[row.confidence.level]}</span>` +
       `${reasons ? ` 原因：${reasons}` : ''}</div>` +
+      `<div class="decision-detail"><p><b>已知：</b>TVL ${fmtUsd(row.tvl_usd)}；隐含估值带 ${fmtUsd(row.band_lo)}–${fmtUsd(row.band_hi)}；样本重采样排名波动区间 ${row.rank_p10}–${row.rank_p90}；拥挤度 ${fmtX(row.crowding)}；代币状态：${tokenLabel(row)}。</p>` +
+      `<p><b>未知：</b>${esc(row.name)} 的快照不能确定是否发币、空投分配比例、资格权重及未来代币供给结构。</p>` +
+      `<p><b>行动结论：</b>${esc(verdictLabel(row))}；${esc(p.steps[0] || '暂无步骤')}</p></div>` +
       `<div class="plan-grid">${steps}</div>` +
       `<div class="counter plan-counter">反证：${esc(row.counter)}</div></div>`;
-    const header = document.querySelector('.head');
-    header.parentNode.insertBefore(sec, header.nextSibling);
+    const anchor = document.getElementById('banner') || document.querySelector('.head');
+    anchor.parentNode.insertBefore(sec, anchor.nextSibling);
+    document.querySelector('.decision-map').style.display = 'none';
     tableZone.style.display = 'none';
     document.getElementById('heat').closest('section').style.display = 'none';
     const scatterZone = document.getElementById('scatter').closest('section');
@@ -586,6 +614,7 @@ function init(R) {
   // '#view=portfolio': header + heatmap band + the three portfolio cards in one row; the hero bar,
   // master-detail zone, scatter and methodology sections are hidden. No scrolling.
   if (HASH.mode === 'portfolio') {
+    document.querySelector('.decision-map').style.display = 'none';
     tableZone.style.display = 'none';
     const scatterZone = document.getElementById('scatter').closest('section');
     if (scatterZone) scatterZone.style.display = 'none';

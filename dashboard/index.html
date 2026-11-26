@@ -27,6 +27,12 @@
     <p class="stab num" id="hstab"></p>
   </section>
 
+  <section class="decision-map">
+    <h2>机会决策地图</h2>
+    <div id="quadrants" class="quadrants"></div>
+    <p class="map-note">象限是呈现用启发式，不合成总分。吸引力 = 隐含估值 ÷ TVL，178 行中 ≥中位数为高；可靠性 = 置信等级非 low 且样本重采样排名波动区间宽度（rank_p90 − rank_p10）≤ 全榜中位宽度为高，其余为低。</p>
+  </section>
+
   <section>
     <h2>链 × 类别 · 未发币 TVL 占比</h2>
     <div id="heat"></div>
@@ -64,7 +70,7 @@
         <table class="ltable">
           <thead><tr>
             <th>名次</th><th>协议</th><th>类别</th><th>状态</th><th>链数</th><th>TVL</th><th>7日</th>
-            <th>隐含估值（P25–P75）</th><th>置信</th><th>拥挤度</th><th>vs TVL</th>
+            <th>隐含估值（P25–P75）</th><th>置信</th><th>判定</th><th>拥挤度</th><th>vs TVL</th>
           </tr></thead>
           <tbody id="tbody"></tbody>
         </table>
@@ -101,6 +107,8 @@
         <p class="num formula">log10 mcap = a + b·log10 TVL + 类别收缩截距 + 链收缩截距 + c·log10(收录天数) + d·动量</p>
         <p>点估计与 P25–P75 带来自类别内残差分位（n&lt;5 用全局池），再由留出回测残差拟合的单一全局系数校准带宽。</p>
         <h3>拟合系数与影子回测</h3>
+        <p>同折 OOF：3× 内占比完整模型 0.4889，纯 TVL 基线 0.4444；P25–P75 带覆盖率分别为 0.4111 和 0.4778，须与带宽一起看；中位偏差（带符号）分别为 0.0032 和 0.0549，仅反映偏差方向与中心。</p>
+        <p>样本重采样排名波动区间不覆盖模型结构错误与已发币/未发币分布迁移风险。</p>
         <table class="ctable"><tbody id="mcoef"></tbody></table>
         <p class="calnote" id="mcal"></p>
         <h3>Top 10 与纯 TVL 排名的分歧（逐条）</h3>

@@ -1189,7 +1189,7 @@ export function buildRadar(snapshot: Snapshot): RadarResult {
     before_coverage: uncalibratedOof.metrics.band_coverage,
     after_coverage: calibratedOof.metrics.band_coverage,
     method:
-      'K=5 折 out-of-fold：每折用其余 4 折拟合并以训练折残差校准带宽，在本折评估；汇总 OOF 覆盖率与中位对数误差。',
+      'K=5 折 out-of-fold：每折用其余 4 折拟合并以训练折残差校准带宽，在本折评估；汇总 OOF 覆盖率与中位偏差（带符号）。',
   };
 
   // Baselines on the same folds.
@@ -1373,7 +1373,7 @@ export function buildRadar(snapshot: Snapshot): RadarResult {
   const board: BoardRow[] = seeds.map((s, i) => {
     const reasons: string[] = [];
     const lowCategory = s.categoryN < 5;
-    if (lowCategory) reasons.push('同类样本不足n');
+    if (lowCategory) reasons.push(`同类样本不足（n=${s.categoryN}）`);
     if (s.bandHi / Math.max(s.bandLo, 1) > wideRatio) reasons.push('残差宽');
     if (Math.abs(s.zMom) > 3) reasons.push('动量3σ');
     let level: BoardConfidence['level'];
