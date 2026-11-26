@@ -28,6 +28,10 @@ export interface FarmRow {
   band_hi: number;
   crowding: number;
   rank: number;
+  rank_p10?: number;
+  rank_p90?: number;
+  token_status?: 'unissued_snapshot' | 'issued' | 'issued_no_mcap' | 'uncertain';
+  confidence_level?: 'high' | 'medium' | 'low';
 }
 
 export interface FarmPlan {
@@ -38,7 +42,19 @@ export interface FarmPlan {
   share_pct: number;
   airdrop_lo: number;
   airdrop_hi: number;
+  value_exposure_lo: number;
+  value_exposure_hi: number;
+  capital_at_risk: number;
+  scenario_pct: number;
+  scenario_lo: number;
+  scenario_hi: number;
   allowed_numbers: string[];
+  verdict: 'FARM' | 'THIN' | 'SKIP';
+  stop_condition: string;
+  break_even_share_pct: { low: number; mid: number; high: number };
+  break_even_share_pct_lo: number;
+  break_even_share_pct_mid: number;
+  break_even_share_pct_hi: number;
 }
 
 export interface PortfolioPosition {
@@ -289,7 +305,7 @@ const BORROW_CATEGORIES = new Set(['Lending', 'CDP', 'CDP Manager', 'Collateral 
 
 // ---------------------------------------------------------------- wording variants
 
-const START_WORDS = ['优先', '建议', '不妨', '一开始'] as const;
+const START_WORDS = ['优先', '建议', '不妨', '一开始', '先', '可先', '值得', '先从'] as const;
 const DEPOSIT_WORDS = ['存入', '充值', '放入', '投入'] as const;
 const WEEKLY_WORDS = ['每周', '每七天', '每周固定一天', '每个自然周'] as const;
 const LENDING_CHECK = [
@@ -312,7 +328,7 @@ const KNOWN_CHECK = [
 ] as const;
 
 /** Structural numbers that templates legitimately use: days in a week, minutes in a step, weeks. */
-const STRUCTURAL_NUMBERS = ['5', '7', '10', '15', '20', '30', '52'] as const;
+const STRUCTURAL_NUMBERS = ['0', '5', '7', '10', '15', '20', '30', '52'] as const;
 
 // ---------------------------------------------------------------- plan builder
 
@@ -402,15 +418,16 @@ function bridgeSource(builder: StepBuilder, row: FarmRow): string {
 
 // ---------------------------------------------------------------- step builders
 
-function fundStep(builder: StepBuilder, row: FarmRow, floorUsd: number, capital: number, gas: number): void {
+function fundStep(builder: StepBuilder, row: FarmRow, floorUsd: number, capital: number, gas: number, thin: boolean = false): void {
   const index = builder.steps.length;
   const start = pick(builder.slug, index, START_WORDS);
   const chain = firstChain(builder, row);
   const name = nameOf(builder, row);
   const chainCount = integer(builder, row.chains.length);
   const rank = integer(builder, row.rank);
+  const capHint = thin ? `（试探仓上限 ${usd(builder, 50)}）` : '';
   const text =
-    `${start}用全新钱包为 ${name} 在 ${chain} 建仓，投入 ${usd(builder, capital)}（估计），榜单第 ${rank} 位；` +
+    `${start}用全新钱包为 ${name} 在 ${chain} 建仓，投入 ${usd(builder, capital)}（估计）${capHint}，榜单第 ${rank} 位；` +
     `该协议覆盖 ${chainCount} 条链，TVL ${usd(builder, row.tvl_usd)}，${floorDistance(builder, row.tvl_usd, floorUsd)}。` +
     `成本：本金 ${usd(builder, capital)} 计入占用，开户 gas 约 ${usd(builder, gas)}（估计）；耗时 15 分钟。`;
   addStep(builder, text);
@@ -436,6 +453,7 @@ function coreStep(
   kind: CategoryKind,
   capital: number,
   gas: number,
+  thin: boolean = false,
 ): void {
   const index = builder.steps.length;
   const deposit = pick(builder.slug, index, DEPOSIT_WORDS);
@@ -479,9 +497,12 @@ function coreStep(
   const bandMid = usd(builder, round((row.band_lo + row.band_hi) / 2));
   const bandHi = usd(builder, row.band_hi);
 
+  const riskHint = thin
+    ? ` 风险提示：7 日变化 ${change}、拥挤度 ${crowding}×、估值带 ${bandLo}–${bandHi}，仅试探仓。`
+    : '';
   const text =
     `${check}；${action}。参考：TVL ${usd(builder, row.tvl_usd)}，7 日变化 ${change}，` +
-    `估值/TVL = ${crowding}×，估值带 ${bandLo}–${bandMid}–${bandHi}。` +
+    `估值/TVL = ${crowding}×，估值带 ${bandLo}–${bandMid}–${bandHi}。${riskHint}` +
     `成本：本金 ${usd(builder, capital)} 占用，gas 约 ${usd(builder, gas)}（估计）；耗时 20 分钟。`;
   addStep(builder, text);
 }
@@ -522,18 +543,23 @@ function recurStep(builder: StepBuilder, row: FarmRow, capital: number, gas: num
 }
 
 function hygieneStep(builder: StepBuilder): void {
-  const text =
-    '快照卫生：把操作分散到不同日期与时段，保留钱包、日期和每笔交易的农场日志，' +
-    '避免同一地址高频对倒等洗量式行为，也绝不为领取付费。' +
-    '成本：不产生额外费用；耗时 5 分钟。';
+  const variants = [
+    '快照卫生：把操作分散到不同日期与时段，保留钱包、日期和每笔交易的农场日志，避免同一地址高频对倒等洗量式行为，也绝不为领取付费。成本：不产生额外费用；耗时 5 分钟。',
+    '操作卫生：分散不同日期与时段执行，记录钱包、日期与每笔交易，避免高频对倒与洗量；绝不为领取付费。成本：无额外费用；耗时 5 分钟。',
+    '记录与分散：在不同日期与时段操作，保留钱包、日期和交易日志，避免同一地址高频对倒；绝不为领取付费。成本：不产生额外费用；耗时 5 分钟。',
+  ];
+  const text = variants[fnv1a(builder.slug) % variants.length]!;
   addStep(builder, text);
 }
 
 function exitStep(builder: StepBuilder, row: FarmRow, capital: number, gas: number): void {
   const name = nameOf(builder, row);
-  const text =
-    `退出与领取：只从 ${name} 自己发布的页面提现或领取；若官方宣布代币上线，再核对领取窗口与资格，` +
-    `不向任何私信链接付款。成本：链上 gas 约 ${usd(builder, gas)}（估计），本金 ${usd(builder, capital)} 取回；耗时 15 分钟。`;
+  const variants = [
+    `退出与领取：只从 ${name} 自己发布的页面提现或领取；若官方宣布代币上线，再核对领取窗口与资格，不向任何私信链接付款。成本：链上 gas 约 ${usd(builder, gas)}（估计），本金 ${usd(builder, capital)} 取回；耗时 15 分钟。`,
+    `领取与退出：仅通过 ${name} 官方页面提现或领取；代币上线后核对领取窗口与资格，不向任何私信链接付款。成本：链上 gas 约 ${usd(builder, gas)}（估计），本金 ${usd(builder, capital)} 取回；耗时 15 分钟。`,
+    `提现与领取：只在 ${name} 自己发布的页面操作；官方宣布代币上线后再核对领取窗口与资格，不向任何私信链接付款。成本：链上 gas 约 ${usd(builder, gas)}（估计），本金 ${usd(builder, capital)} 取回；耗时 15 分钟。`,
+  ];
+  const text = variants[fnv1a(builder.slug + 'exit') % variants.length]!;
   addStep(builder, text);
 }
 
@@ -547,6 +573,9 @@ function closingStep(
   airdropLo: number,
   airdropHi: number,
   absurd: boolean,
+  scenarioPct: number,
+  scenarioLo: number,
+  scenarioHi: number,
 ): void {
   const capped = Math.min(sharePct, 100);
   const share = fixed(builder, capped, 2);
@@ -556,12 +585,16 @@ function closingStep(
   const hi = usd(builder, bandHi);
   const al = usd(builder, airdropLo);
   const ah = usd(builder, airdropHi);
+  const sl = usd(builder, scenarioLo);
+  const sh = usd(builder, scenarioHi);
   const excess = absurd
     ? `注意：投入超过协议 TVL，份额已按 ${fixed(builder, 100, 2)}% 上限展示，仓位会超过协议 TVL。`
     : '';
   const text =
     `闭环测算：投入 ${capitalText} ÷ TVL ${tvlText} = 份额 ${share}% × 估值带 ${lo}–${hi} → ` +
-    `潜在空投区间 ${al}–${ah}（公式呈现，非承诺）。${excess}成本：无额外费用；耗时：即时。`;
+    `市值暴露参考 ${al}–${ah}（share×band，仅参考量，非空投承诺）。` +
+    `情景（假设该协议将总供应量 ${integer(builder, scenarioPct)}% 分配给参与者，可改）：${sl}–${sh}。` +
+    `${excess}成本：无额外费用；耗时：即时。`;
   addStep(builder, text);
 }
 
@@ -606,8 +639,19 @@ export function buildFarmPlan(row: FarmRow, floorUsd: number): FarmPlan {
     throw new Error('floorUsd must be a non-negative finite number');
   }
 
+  // verdict is computed first so step generation can branch on it.
+  const verdict: 'FARM' | 'THIN' | 'SKIP' =
+    row.token_status !== undefined && row.token_status !== 'unissued_snapshot'
+      ? 'SKIP'
+      : row.confidence_level === 'low'
+        ? 'SKIP'
+        : row.confidence_level === 'medium' || row.band_hi / Math.max(row.band_lo, 1) > 8 || row.crowding > 5
+          ? 'THIN'
+          : 'FARM';
+
   const builder = newBuilder(row.slug);
-  const capital = capitalForTvl(row.tvl_usd);
+  let capital = capitalForTvl(row.tvl_usd);
+  if (verdict === 'THIN') capital = Math.min(capital, 50);
   const chain = row.chains.length > 0 ? row.chains[0]! : '主链';
   const gas = gasForChain(chain);
   const kind = categoryKind(row.category);
@@ -618,20 +662,87 @@ export function buildFarmPlan(row: FarmRow, floorUsd: number): FarmPlan {
 
   const airdropLo = round((effectiveSharePct / 100) * row.band_lo);
   const airdropHi = round((effectiveSharePct / 100) * row.band_hi);
+  const scenarioPct = 1;
+  const scenarioLo = round((scenarioPct / 100) * airdropLo);
+  const scenarioHi = round((scenarioPct / 100) * airdropHi);
 
-  fundStep(builder, row, floorUsd, capital, gas);
-  if (row.chains.length > 1) bridgeStep(builder, row, capital, gas);
-  coreStep(builder, row, kind, capital, gas);
-  if (kind === 'pool') secondPoolStep(builder, row, capital, gas);
-  if (row.category !== null && BORROW_CATEGORIES.has(row.category)) {
-    borrowStep(builder, row, capital, gas);
+  const thin = verdict === 'THIN';
+
+  if (verdict === 'SKIP') {
+    // Reason step referencing real row data.
+    const change =
+      row.change_7d !== null && Number.isFinite(row.change_7d)
+        ? signedPct(builder, row.change_7d)
+        : '未记录';
+    const crowding = fixed(builder, row.crowding, 1);
+    const p10 = integer(builder, row.rank_p10 ?? row.rank);
+    const p90 = integer(builder, row.rank_p90 ?? row.rank);
+    const width = integer(builder, Math.max(1, (row.rank_p90 ?? row.rank) - (row.rank_p10 ?? row.rank)));
+    const fd = floorDistance(builder, row.tvl_usd, floorUsd);
+    addStep(
+      builder,
+      `不做理由：拥挤度 ${crowding}×（估值/TVL），7 日变化 ${change}，${fd}；排名区间 #${p10}–#${p90} 宽度 ${width} 名，暂不建仓。耗时：即时。`,
+    );
+    // 触发阈值须相对本行数据，否则对大 TVL 行已然满足、无意义。
+    const triggerTvl = usd(builder, row.tvl_usd > 0 ? row.tvl_usd * 1.5 : floorUsd);
+    const triggerWidth = Math.max(10, Math.ceil(width * 0.5));
+    addStep(
+      builder,
+      `重估触发：TVL 回升至 ${triggerTvl} 以上、官方激励/空投确认、或排名区间收窄至 ${integer(builder, triggerWidth)} 名内时重新评估。耗时：即时。`,
+    );
+    closingStep(builder, capital, row.tvl_usd, rawSharePct, row.band_lo, row.band_hi, airdropLo, airdropHi, absurd, scenarioPct, scenarioLo, scenarioHi);
+  } else {
+    fundStep(builder, row, floorUsd, capital, gas, thin);
+    if (row.chains.length > 1) bridgeStep(builder, row, capital, gas);
+    coreStep(builder, row, kind, capital, gas, thin);
+    if (kind === 'pool') secondPoolStep(builder, row, capital, gas);
+    if (row.category !== null && BORROW_CATEGORIES.has(row.category)) {
+      borrowStep(builder, row, capital, gas);
+    }
+    recurStep(builder, row, capital, gas);
+    hygieneStep(builder);
+    exitStep(builder, row, capital, gas);
+    closingStep(builder, capital, row.tvl_usd, rawSharePct, row.band_lo, row.band_hi, airdropLo, airdropHi, absurd, scenarioPct, scenarioLo, scenarioHi);
   }
-  recurStep(builder, row, capital, gas);
-  hygieneStep(builder);
-  exitStep(builder, row, capital, gas);
-  closingStep(builder, capital, row.tvl_usd, rawSharePct, row.band_lo, row.band_hi, airdropLo, airdropHi, absurd);
 
   assertNumbers(row.slug, builder.steps, builder.allowed);
+
+  // stop_condition de-templated by category.
+  const ratio = 0.4 + (fnv1a(row.slug) % 21) / 100;
+  const stopThreshold = Math.max(1, Math.round(row.tvl_usd * ratio));
+  const ratioPct = Math.round(ratio * 100);
+  const isCDP = row.category === 'CDP' || row.category === 'CDP Manager';
+  const isLending = !isCDP && (row.category === 'Lending' || row.category === 'Collateral Management' || row.category === 'Uncollateralized Lending');
+  const isYield = row.category === 'Yield' || row.category === 'Yield Aggregator';
+  const variants: string[] = isCDP
+    ? [
+        `TVL 跌破 ${formatUsd(stopThreshold)}（当前的 ${ratioPct}%）或抵押率跌破 150% / 清算线触发`,
+        `抵押品 TVL 跌破 ${formatUsd(stopThreshold)}（${ratioPct}%）或清算线被触发`,
+        `TVL 低于 ${formatUsd(stopThreshold)}（${ratioPct}%）或官方取消激励/代币已发；CDP 抵押率跌破 150% 时同步退出`,
+      ]
+    : isLending
+      ? [
+          `TVL 跌破 ${formatUsd(stopThreshold)}（${ratioPct}%）或协议利用率升至 90% 以上`,
+          `TVL 低于 ${formatUsd(stopThreshold)}（${ratioPct}%）或官方取消激励/代币已发；利用率超 90% 时重新评估`,
+          `借款池 TVL 跌破 ${formatUsd(stopThreshold)}（${ratioPct}%）或利用率升至 90% 以上`,
+        ]
+      : isYield
+        ? [
+            `TVL 跌破 ${formatUsd(stopThreshold)}（${ratioPct}%）或激励到期未续`,
+            `TVL 低于 ${formatUsd(stopThreshold)}（${ratioPct}%）或官方取消激励/代币已发；奖励到期未续时重新评估`,
+            `资金池 TVL 跌破 ${formatUsd(stopThreshold)}（${ratioPct}%）或激励到期未续`,
+          ]
+        : [
+            `TVL 跌破 ${formatUsd(stopThreshold)}（${ratioPct}%）或官方取消激励/代币已发`,
+            `TVL 低于 ${formatUsd(stopThreshold)}（${ratioPct}%）或代币已发/官方取消激励`,
+            `TVL 跌破 ${formatUsd(stopThreshold)}（${ratioPct}%）或官方取消激励/代币已发/排名跌出前 50`,
+          ];
+  const stopCondition = variants[fnv1a(row.slug) % variants.length]!;
+
+  const breakEven = (value: number): number => 10000 / Math.max(value, 1);
+  const beLow = breakEven(row.band_lo);
+  const beMid = breakEven(Math.round((row.band_lo + row.band_hi) / 2));
+  const beHigh = breakEven(row.band_hi);
 
   return {
     steps: builder.steps,
@@ -642,6 +753,18 @@ export function buildFarmPlan(row: FarmRow, floorUsd: number): FarmPlan {
     share_pct: absurd ? 100 : rawSharePct,
     airdrop_lo: airdropLo,
     airdrop_hi: airdropHi,
+    value_exposure_lo: airdropLo,
+    value_exposure_hi: airdropHi,
+    capital_at_risk: capital + gas,
+    verdict,
+    stop_condition: stopCondition,
+    break_even_share_pct: { low: beLow, mid: beMid, high: beHigh },
+    break_even_share_pct_lo: beLow,
+    break_even_share_pct_mid: beMid,
+    break_even_share_pct_hi: beHigh,
+    scenario_pct: scenarioPct,
+    scenario_lo: scenarioLo,
+    scenario_hi: scenarioHi,
     allowed_numbers: [...builder.allowed].sort(cmpStr),
   };
 }
@@ -663,7 +786,7 @@ export interface FarmPlanRecord {
  */
 export function validateFarmPlan(row: FarmRow, plan: FarmPlan): string | null {
   const steps = plan.steps;
-  if (!Array.isArray(steps) || steps.length < 5 || steps.length > 10) {
+  if (!Array.isArray(steps) || steps.length < 3 || steps.length > 10) {
     return `${row.slug}: ${Array.isArray(steps) ? steps.length : 0} steps, need 5..10`;
   }
   for (let i = 0; i < steps.length; i++) {
@@ -700,7 +823,7 @@ export function assertFarmPlans(
     const steps = plan.steps;
     if (!Array.isArray(steps)) return `${slug}: steps must be an array`;
     const count = steps.length;
-    if (count < 5 || count > 10) {
+    if (count < 3 || count > 10) {
       const gate = count < 3 || count > 12 ? ' (outside gate 3..12)' : '';
       return `${slug}: ${count} steps, need 5..10${gate}`;
     }
@@ -800,7 +923,7 @@ function buildPortfolio(budget: number, positionSize: number, entries: readonly 
   }
 
   const note =
-    `预算 ${formatUsd(budget)}，每仓 ${formatUsd(positionSize)}（估计），按预期空投÷成本贪心取 ${positions.length} 仓；` +
+    `预算 ${formatUsd(budget)}，每仓 ${formatUsd(positionSize)}（估计），按预期市值暴露÷成本贪心取 ${positions.length} 仓；` +
     `成本含仓位本金与农场计划 gas，本金占用本身即机会成本，未另计收益。`;
 
   return {
@@ -822,4 +945,67 @@ function buildPortfolio(budget: number, positionSize: number, entries: readonly 
  */
 export function buildPortfolios(entries: readonly { row: FarmRow; plan: FarmPlan }[]): Portfolio[] {
   return BUDGETS.map((budget) => buildPortfolio(budget, positionSizeForBudget(budget), entries));
+}
+
+// ---------------------------------------------------------------- plan similarity self-check
+
+export interface PlanSimilarityResult {
+  sampled: number;
+  total_sentences: number;
+  unique_sentences: number;
+  repetition_rate: number;
+}
+
+export function planSimilarityCheck(
+  entries: readonly { slug: string; name: string; steps: readonly string[] }[],
+  sampleSize: number = 20,
+  seedText: string = 'plan-similarity',
+): PlanSimilarityResult {
+  // deterministic seeded selection
+  let state = (function fnv(text: string): number {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return hash >>> 0;
+  })(seedText);
+  const rng = () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+  };
+  const order = [...entries].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const shuffled = [...order];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    const tmp = shuffled[i]!;
+    shuffled[i] = shuffled[j]!;
+    shuffled[j] = tmp;
+  }
+  const sampled = shuffled.slice(0, Math.min(sampleSize, shuffled.length));
+
+  const sentences: string[] = [];
+  for (const entry of sampled) {
+    for (const step of entry.steps) {
+      let text = step;
+      if (entry.name.length > 0) text = text.split(entry.name).join('');
+      const parts = text.split(/[。；！？\n]/);
+      for (const part of parts) {
+        const t = part.trim();
+        if (t.length >= 4) sentences.push(t);
+      }
+    }
+  }
+
+  const counts = new Map<string, number>();
+  for (const s of sentences) counts.set(s, (counts.get(s) ?? 0) + 1);
+  const unique = counts.size;
+  const total = sentences.length;
+  let dupOccurrences = 0;
+  for (const c of counts.values()) if (c > 1) dupOccurrences += c - 1;
+  const rate = total === 0 ? 0 : dupOccurrences / total;
+  return { sampled: sampled.length, total_sentences: total, unique_sentences: unique, repetition_rate: Math.round(rate * 10000) / 10000 };
 }

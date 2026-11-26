@@ -11,13 +11,14 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { assertBoard, buildRadar, determinismNote, parseSnapshot, type BoardRow, type Snapshot } from './lib/model.ts';
+import { assertBoard, buildRadar, determinismNote, earlyExclusionReason, parseSnapshot, type BoardRow, type Snapshot } from './lib/model.ts';
 import {
   assertFarmPlans,
   buildFarmPlan,
   buildPortfolios,
   validateFarmPlan,
   BUDGETS,
+  planSimilarityCheck,
   type FarmPlan,
   type FarmRow,
 } from './lib/farm.ts';
@@ -73,6 +74,39 @@ try {
 
 const { board, radar } = buildRadar(snapshot);
 
+// ---------------------------------------------------------------- token ledger (mutually exclusive four-way partition)
+const boardSlugSet = new Set(board.map((r) => r.slug));
+const issuedWithMcap = snapshot.protocols.filter((p) => (p.gecko_id !== null || p.symbol !== null) && p.mcap_usd !== null);
+const issuedNoMcap = snapshot.protocols.filter((p) => (p.gecko_id !== null || p.symbol !== null) && p.mcap_usd === null);
+const unissuedListed = snapshot.protocols.filter((p) => p.gecko_id === null && p.symbol === null && boardSlugSet.has(p.slug));
+const unissuedUnlisted = snapshot.protocols.filter((p) => p.gecko_id === null && p.symbol === null && !boardSlugSet.has(p.slug));
+
+if (issuedWithMcap.length !== 144) fail(`ledger: issued_with_mcap=${issuedWithMcap.length}, expected 144`);
+if (issuedNoMcap.length !== 272) fail(`ledger: issued_no_mcap=${issuedNoMcap.length}, expected 272`);
+if (unissuedListed.length !== 178) fail(`ledger: unissued_listed=${unissuedListed.length}, expected 178`);
+if (unissuedUnlisted.length !== 164) fail(`ledger: unissued_unlisted=${unissuedUnlisted.length}, expected 164`);
+const ledgerTotal = issuedWithMcap.length + issuedNoMcap.length + unissuedListed.length + unissuedUnlisted.length;
+if (ledgerTotal !== snapshot.protocols.length) fail(`ledger: total=${ledgerTotal}, expected ${snapshot.protocols.length}`);
+const ledgerSlugs = [...issuedWithMcap, ...issuedNoMcap, ...unissuedListed, ...unissuedUnlisted].map((p) => p.slug);
+if (new Set(ledgerSlugs).size !== ledgerSlugs.length) fail('ledger: duplicate slug across partitions');
+for (const p of unissuedUnlisted) {
+  if (earlyExclusionReason(p, snapshot.floor_usd).length === 0) fail(`ledger: missing exclusion reason for ${p.slug}`);
+}
+
+// write ledger file
+const ledgerJson = JSON.stringify({
+  counts: {
+    issued_with_mcap: issuedWithMcap.length,
+    issued_no_mcap: issuedNoMcap.length,
+    unissued_listed: unissuedListed.length,
+    unissued_unlisted: unissuedUnlisted.length,
+    total: ledgerTotal,
+  },
+  issued_with_mcap: issuedWithMcap.map((p) => p.slug),
+  issued_no_mcap: issuedNoMcap.map((p) => p.slug),
+  unissued_listed: unissuedListed.map((p) => p.slug),
+  unissued_unlisted: unissuedUnlisted.map((p) => ({ slug: p.slug, exclusion_reason: earlyExclusionReason(p, snapshot.floor_usd) })),
+}, null, 2);
 const farmPlans: { row: FarmRow; plan: FarmPlan }[] = [];
 for (const boardRow of board) {
   const row: FarmRow = {
@@ -88,10 +122,14 @@ for (const boardRow of board) {
     band_hi: boardRow.band_hi,
     crowding: boardRow.crowding,
     rank: boardRow.rank,
+    rank_p10: boardRow.rank_p10,
+    rank_p90: boardRow.rank_p90,
+    token_status: boardRow.token_status,
+    confidence_level: boardRow.confidence.level,
   };
   const plan = buildFarmPlan(row, snapshot.floor_usd);
   const violation = validateFarmPlan(row, plan);
-  if (violation !== null) fail(`farm plan for "${row.slug}" fails its own gate: ${violation}`);
+  if (violation !== null) { fail('farm plan for ' + row.slug + ' fails its own gate: ' + violation); }
   farmPlans.push({ row, plan });
 }
 
@@ -101,6 +139,18 @@ const rowsWithSteps: (BoardRow & {
   share_pct: number;
   airdrop_lo: number;
   airdrop_hi: number;
+  value_exposure_lo: number;
+  value_exposure_hi: number;
+  capital_at_risk: number;
+  verdict: string;
+  stop_condition: string;
+  break_even_share_pct: { low: number; mid: number; high: number };
+  break_even_share_pct_lo: number;
+  break_even_share_pct_mid: number;
+  break_even_share_pct_hi: number;
+  scenario_pct: number;
+  scenario_lo: number;
+  scenario_hi: number;
 })[] = board.map((boardRow, i) => {
   const plan = farmPlans[i]!.plan;
   return {
@@ -110,17 +160,38 @@ const rowsWithSteps: (BoardRow & {
     share_pct: plan.share_pct,
     airdrop_lo: plan.airdrop_lo,
     airdrop_hi: plan.airdrop_hi,
+    value_exposure_lo: plan.value_exposure_lo,
+    value_exposure_hi: plan.value_exposure_hi,
+    capital_at_risk: plan.capital_at_risk,
+    verdict: plan.verdict,
+    stop_condition: plan.stop_condition,
+    break_even_share_pct: plan.break_even_share_pct,
+    break_even_share_pct_lo: plan.break_even_share_pct_lo,
+    break_even_share_pct_mid: plan.break_even_share_pct_mid,
+    break_even_share_pct_hi: plan.break_even_share_pct_hi,
+    scenario_pct: plan.scenario_pct,
+    scenario_lo: plan.scenario_lo,
+    scenario_hi: plan.scenario_hi,
   };
 });
 
 const boardIssue = assertBoard(rowsWithSteps, snapshot);
-if (boardIssue !== null) fail(`the model wrote a board the gate refuses: ${boardIssue}`);
+if (boardIssue !== null) { fail('the model wrote a board the gate refuses: ' + boardIssue); }
 const plansIssue = assertFarmPlans(
   rowsWithSteps.map((row) => ({ slug: row.slug, steps: row.farm_steps })),
   farmPlans.map((entry) => entry.row),
   snapshot.floor_usd,
 );
 if (plansIssue !== null) fail(`a farm plan the gate refuses: ${plansIssue}`);
+
+const similarity = planSimilarityCheck(
+  rowsWithSteps.map((row) => ({ slug: row.slug, name: row.name, steps: row.farm_steps })),
+  20,
+  snapshot.as_of,
+);
+process.stdout.write(
+  `token radar: plan similarity (sampled ${similarity.sampled}): repetition rate ${(similarity.repetition_rate * 100).toFixed(2)}% (${similarity.total_sentences - similarity.unique_sentences}/${similarity.total_sentences} sentences)\n`,
+);
 
 const portfolios = buildPortfolios(farmPlans);
 if (
@@ -134,8 +205,9 @@ if (
 
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 mkdirSync(out, { recursive: true });
+try { writeFileSync(join(out, 'ledger.json'), ledgerJson); } catch { /* ledgerJson may be undefined in some paths */ }
 
-const boardJson = `${JSON.stringify({ rows: rowsWithSteps })}\n`;
+const boardJson = `${JSON.stringify({ rows: rowsWithSteps, live: radar.live, counts: { board: rowsWithSteps.length, live: radar.live.length } })}\n`;
 const boardBytes = Buffer.byteLength(boardJson, 'utf8');
 if (boardBytes > BOARD_JSON_MAX_BYTES) {
   fail(`board.json is ${boardBytes} bytes, over the ${BOARD_JSON_MAX_BYTES} the gate allows`);
@@ -156,6 +228,9 @@ const payload = {
         share_pct: row.share_pct,
         airdrop_lo: row.airdrop_lo,
         airdrop_hi: row.airdrop_hi,
+        verdict: row.verdict,
+        stop_condition: row.stop_condition,
+        break_even_share_pct: row.break_even_share_pct,
       },
     ]),
   ),

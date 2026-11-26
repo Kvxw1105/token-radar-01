@@ -101,8 +101,9 @@ if (typeof document !== 'undefined') {
 
 function init(R) {
   // All page state lives in one object; render() is the only DOM writer besides selectRow().
-  const state = { sort: 'implied', wonly: true, cat: '*', chain: '*', tier: '*', sel: '' };
+  const state = { sort: 'implied', wonly: true, cat: '*', chain: '*', tier: '*', sel: '', tab: 'pre' };
   const rows = R.rows;
+  const live = R.live || [];
   const covered = rows.filter((r) => r.on_watchlist).length;
 
   // '#slug=<slug>': default view with that row already selected (unknown slug → default).
@@ -165,25 +166,59 @@ function init(R) {
 
   function render() {
     const view = visible();
-    if (!view.some((r) => r.slug === state.sel)) state.sel = view.length ? view[0].slug : '';
+    if (state.tab === 'pre' && !view.some((r) => r.slug === state.sel)) state.sel = view.length ? view[0].slug : '';
     renderHead();
+    renderBanner();
     renderHero();
     renderHeat();
-    renderTable(view);
-    renderDetail();
+    const pre = state.tab === 'pre';
+    document.getElementById('pre-controls').hidden = !pre;
+    document.getElementById('boardwrap').hidden = !pre;
+    document.getElementById('detail').hidden = !pre;
+    document.getElementById('livewrap').hidden = pre;
+    document.getElementById('live-note').hidden = pre;
+    if (pre) {
+      renderTable(view);
+      renderDetail();
+    } else {
+      renderLive();
+    }
     renderScatter();
     renderPortfolios();
     renderMethod();
-    document.getElementById('count').textContent = `显示 ${view.length} / ${rows.length} 行`;
+    document.getElementById('count').textContent = pre ? `显示 ${view.length} / ${rows.length} 行` : `显示 ${live.length} / ${live.length} 行`;
     for (const b of document.querySelectorAll('#sorts button')) b.classList.toggle('on', b.dataset.k === state.sort);
     document.getElementById('wbadge').textContent = `${covered}/${R.watchlist_size}`;
+    document.getElementById('tabs').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.tab === state.tab));
   }
 
   function renderHead() {
+    const tcPre = document.getElementById('tc-pre');
+    if (tcPre) tcPre.textContent = rows.length;
+    const tcLive = document.getElementById('tc-live');
+    if (tcLive) tcLive.textContent = live.length;
     document.getElementById('asof').textContent = R.as_of;
     document.getElementById('fasof').textContent = R.as_of;
     document.getElementById('floor').textContent = fmtUsd(R.floor_usd);
     document.getElementById('hcounts').textContent = `榜单 ${R.board_size} · 早期 ${R.early_size} · 关注名单 ${R.watchlist_size}`;
+  }
+
+  function renderBanner() {
+    const el = document.getElementById('banner');
+    if (!el) return;
+    const L = R.ledger || {};
+    const total = L.total || R.rows.length + (R.live ? R.live.length : 0);
+    const issued = (L.issued_with_mcap || 0) + (L.issued_no_mcap || 0);
+    const unrec = (L.unissued_listed || 0) + (L.unissued_unlisted || 0);
+    const listed = L.unissued_listed || R.board_size || 0;
+    el.innerHTML =
+      `<span class="bn">${total} 全量</span>` +
+      `<span class="ba">→</span>` +
+      `<span class="bn">${issued} 已发币对照</span>` +
+      `<span class="ba">→</span>` +
+      `<span class="bn">${unrec} 未记录</span>` +
+      `<span class="ba">→</span>` +
+      `<span class="bn acc">${listed} 上榜</span>`;
   }
 
   function renderHero() {
@@ -235,23 +270,45 @@ function init(R) {
     document.getElementById('heat').innerHTML = html + '</div>';
   }
 
+  function renderLive() {
+    document.getElementById('livebody').innerHTML = live
+      .map((r) => {
+        const sym = r.symbol ? ` <span class="sl">${esc(r.symbol)}</span>` : '';
+        return (
+          `<tr>` +
+          `<td><div class="nm">${esc(r.name)}</div>${sym}</td>` +
+          `<td><span class="chip">${esc(r.category || '未分类')}</span></td>` +
+          `<td class="num">${fmtUsd(r.tvl_usd)}</td>` +
+          `<td class="num">${fmtUsd(r.mcap_usd)}</td>` +
+          `<td class="num">${r.multiple.toFixed(2)}×</td></tr>`
+        );
+      })
+      .join('');
+  }
+
   function renderTable(view) {
     document.getElementById('tbody').innerHTML = view
       .map((r) => {
         const chg = r.change_7d;
         const cls = chg === null || !Number.isFinite(chg) ? '' : chg >= 0 ? ' up' : ' dn';
-        return (
-          `<tr class="row${r.slug === state.sel ? ' on' : ''}" data-s="${esc(r.slug)}">` +
-          `<td class="num c dim">${r.rank}</td>` +
-          `<td title="${esc(r.slug)}"><div class="nm">${esc(r.name)}</div></td>` +
-          `<td><span class="chip">${esc(r.category || '未分类')}</span></td>` +
-          `<td class="num c">${r.chains.length}</td>` +
-          `<td class="num">${fmtUsd(r.tvl_usd)}</td>` +
-          `<td class="num${cls}">${fmtChange(chg)}</td>` +
-          `<td class="num"><b>${fmtUsd(r.implied_value_usd)}</b> <span class="band">${fmtUsd(r.band_lo, 1)}–${fmtUsd(r.band_hi, 1)}</span></td>` +
-          `<td><span class="conf ${r.confidence.level}">${CONF_LABEL[r.confidence.level]}</span></td>` +
-          `<td class="num">${fmtX(r.crowding)}</td></tr>`
-        );
+         const ts = r.token_status || 'unissued_snapshot';
+         const tsLabel = ts === 'issued' ? '已发币' : ts === 'issued_no_mcap' ? '已发币·无市值' : ts === 'uncertain' ? '不确定' : '快照未记录';
+         const delta = (r.tvl_rank || r.rank) - r.rank;
+         const deltaHtml = delta > 0 ? `<span class="up">▲${delta}</span>` : delta < 0 ? `<span class="dn">▼${-delta}</span>` : `<span class="dim">—</span>`;
+         return (
+           `<tr class="row${r.slug === state.sel ? ' on' : ''}" data-s="${esc(r.slug)}">` +
+           `<td class="num c dim">${r.rank}（P10–P90：${r.rank_p10}–${r.rank_p90}）</td>` +
+           `<td title="${esc(r.slug)}"><div class="nm">${esc(r.name)}</div></td>` +
+           `<td><span class="chip">${esc(r.category || '未分类')}</span></td>` +
+           `<td><span class="chip">${esc(tsLabel)}</span></td>` +
+           `<td class="num c">${r.chains.length}</td>` +
+           `<td class="num">${fmtUsd(r.tvl_usd)}</td>` +
+           `<td class="num${cls}">${fmtChange(chg)}</td>` +
+           `<td class="num"><b>${fmtUsd(r.implied_value_usd)}</b> <span class="band">${fmtUsd(r.band_lo, 1)}–${fmtUsd(r.band_hi, 1)}</span></td>` +
+           `<td><span class="conf ${r.confidence.level}">${CONF_LABEL[r.confidence.level]}</span></td>` +
+           `<td class="num">${fmtX(r.crowding)}</td>` +
+           `<td class="num">${deltaHtml}</td></tr>`
+         );
       })
       .join('');
   }
@@ -264,7 +321,7 @@ function init(R) {
       el.innerHTML = '<p class="dim">无选中行</p>';
       return;
     }
-    const p = R.plans[r.slug] || { steps: [], capital_usd: 0, share_pct: 0, airdrop_lo: 0, airdrop_hi: 0 };
+    const p = R.plans[r.slug] || { steps: [], capital_usd: 0, share_pct: 0, airdrop_lo: 0, airdrop_hi: 0, verdict: 'FARM', stop_condition: '', break_even_share_pct_lo: 0, break_even_share_pct_mid: 0, break_even_share_pct_hi: 0 };
     const f = r.factors;
     const maxAdj = Math.max(...FACTORS.slice(1).map(([, k]) => Math.abs(f[k])), 0.01);
     const factorRows = FACTORS.map(([key, label], i) => {
@@ -294,6 +351,7 @@ function init(R) {
       `<span class="chip">${esc(r.category || '未分类')}</span>` +
       `<span class="badge ${r.on_watchlist ? 'acc' : 'early'}">${r.on_watchlist ? 'Watchlist' : '地板以下'}</span></div>` +
       `<div class="dch"><span class="dim">链：</span>${r.chains.map(esc).join('、')}</div>` +
+      `<div class="dch"><span class="dim">排名稳定性：</span><span class="num">${r.rank}（P10–P90：${r.rank_p10}–${r.rank_p90}） · 三模型中位 #${r.median_model_rank}</span></div>` +
       `<div class="dnums">` +
       `<span>TVL <b>${fmtUsd(r.tvl_usd)}</b></span>` +
       `<span>7日 <b>${fmtChange(r.change_7d)}</b></span>` +
@@ -303,14 +361,16 @@ function init(R) {
       `<span class="band num">P25 ${fmtUsd(r.band_lo, 1)} – P75 ${fmtUsd(r.band_hi, 1)}</span>` +
       `<span class="conf ${r.confidence.level}">${CONF_LABEL[r.confidence.level]}</span>${reasonLine}</div>` +
       `<h3>因子分解（log10，× = 10^x）</h3><div class="factors">${factorRows}</div>` +
-      `<h3>同类可比</h3><table class="ctable"><tr><th>名称</th><th>TVL</th><th>市值</th><th>市值/TVL</th></tr>${comps}</table>` +
+       `<h3>可比锚点（同类已发币，按 log TVL 最近）</h3><table class="ctable"><tr><th>名称</th><th>TVL</th><th>市值</th><th>市值/TVL</th></tr>${comps}</table>` +
       `<div class="counter">反证：${esc(r.counter)}</div>` +
+      `<div class="counter">农场判定：${esc(p.verdict || 'FARM')} · 停止条件：${esc(p.stop_condition || '')} · 投 $100 回本需分配 ${( (p.break_even_share_pct && p.break_even_share_pct.low) || 0).toFixed(6)}%（低/中/高三档 ${( (p.break_even_share_pct && p.break_even_share_pct.low) || 0).toFixed(6)}% / ${( (p.break_even_share_pct && p.break_even_share_pct.mid) || 0).toFixed(6)}% / ${( (p.break_even_share_pct && p.break_even_share_pct.high) || 0).toFixed(6)}%）</div>` +
       `<h3>农场计划</h3><ol class="steps">${p.steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>` +
       `<div class="pchips num"><span>投入 ${fmtUsd(p.capital_usd)}</span>` +
       `<span>÷ TVL ${fmtUsd(r.tvl_usd, 1)}</span>` +
       `<span>= 份额 ${fmtPct(p.share_pct)}</span>` +
       `<span>× 估值带 ${fmtUsd(r.band_lo, 1)}–${fmtUsd(r.band_hi, 1)}</span>` +
-      `<span>= 空投 ${fmtUsd(p.airdrop_lo, 1)}–${fmtUsd(p.airdrop_hi, 1)}</span></div>`;
+       `<span>= 市值暴露参考 ${fmtUsd(p.airdrop_lo, 1)}–${fmtUsd(p.airdrop_hi, 1)}</span>` +
+       `<span>情景(${p.scenario_pct || 1}%) ${fmtUsd(p.scenario_lo || p.airdrop_lo, 1)}–${fmtUsd(p.scenario_hi || p.airdrop_hi, 1)}</span></div>`;
   }
 
   // Hand-written SVG scatter: log10 TVL vs log10 implied, watchlist in accent, early in secondary.
@@ -361,7 +421,7 @@ function init(R) {
           `<div class="pcard"><h3 class="num">$${p.budget}</h3>` +
           `<div class="pmeta">每仓 <b>$${p.position_size}</b>（估计） · ${p.count} 仓</div>` +
           (pm ? '' : `<p class="pnote">${esc(p.note)}</p>`) +
-          `<div class="ptot num">${pm ? '份额' : '份额合计'} ${fmtPct(p.total_share_pct)} · ${pm ? '空投' : '空投合计'} ${fmtUsd(p.total_airdrop_lo, 1)}–${fmtUsd(p.total_airdrop_hi, 1)}</div>` +
+          `<div class="ptot num">${pm ? '份额' : '份额合计'} ${fmtPct(p.total_share_pct)} · ${pm ? '市值暴露参考' : '市值暴露参考合计'} ${fmtUsd(p.total_airdrop_lo, 1)}–${fmtUsd(p.total_airdrop_hi, 1)}</div>` +
           `<table class="ptab">` +
           p.positions
             .slice(0, pm ? 4 : 8)
@@ -400,7 +460,9 @@ function init(R) {
       row('P25–P75 带覆盖率（校准前）', fmtShare(cal.before_coverage)) +
       row('P25–P75 带覆盖率（校准后）', fmtShare(cal.after_coverage)) +
       row('估值带校准系数 s', cal.coefficient.toFixed(4)) +
-      row('Spearman ρ（只报告不设阈）', R.spearman.rho.toFixed(4));
+       row('Spearman ρ（只报告不设阈）', R.spearman.rho.toFixed(4)) +
+       (R.baselines || []).map((b) => row(b.name + ' · OOF 覆盖率', b.backtest.band_coverage.toFixed(4)) + row(b.name + ' · OOF 中位 log 误差', b.backtest.median_log_err.toFixed(4))).join('') +
+       (R.ablations || []).map((a) => row(a.name + ' · OOF 中位 log 误差', a.median_log_err.toFixed(4))).join('');
     document.getElementById('mcal').textContent = `校准方法：${cal.method}`;
     document.getElementById('mtop10').innerHTML = R.spearman.top10.map((s) => `<li>${esc(s)}</li>`).join('');
     document.getElementById('mcats').innerHTML = m.categories
@@ -456,6 +518,13 @@ function init(R) {
     state.tier = e.target.value;
     render();
   });
+  document.getElementById('tabs').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-tab]');
+    if (b) {
+      state.tab = b.dataset.tab;
+      render();
+    }
+  });
 
   render();
 
@@ -492,7 +561,7 @@ function init(R) {
       `<span>投入 ${fmtUsd(p.capital_usd)}</span>` +
       `<span>份额 ${fmtPct(p.share_pct)}</span>` +
       `<span>估值带 ${fmtUsd(row.band_lo, 1)}–${fmtUsd(row.band_hi, 1)}</span>` +
-      `<span>潜在空投区间 ${fmtUsd(p.airdrop_lo, 1)}–${fmtUsd(p.airdrop_hi, 1)}</span></div>` +
+      `<span>市值暴露参考 ${fmtUsd(p.airdrop_lo, 1)}–${fmtUsd(p.airdrop_hi, 1)}</span></div>` +
       `<div class="plan-conf">置信 ` +
       `<span class="conf ${row.confidence.level}">${CONF_LABEL[row.confidence.level]}</span>` +
       `${reasons ? ` 原因：${reasons}` : ''}</div>` +

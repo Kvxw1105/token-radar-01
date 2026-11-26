@@ -73,6 +73,14 @@ export interface BoardRow {
   crowding: number;
   comps: Comp[];
   factors: BoardFactors;
+  token_status: 'unissued_snapshot' | 'issued' | 'issued_no_mcap' | 'uncertain';
+  tvl_rank: number;
+  rank_p10: number;
+  rank_p90: number;
+  rank_lo: number;
+  rank_hi: number;
+  median_model_rank: number;
+  rank_median_models: number;
 }
 
 /** The dashboard row: the board row carries every field the page needs. */
@@ -127,6 +135,18 @@ export interface SpearmanData {
   top10: string[];
 }
 
+export interface LiveRow {
+  slug: string;
+  name: string;
+  symbol: string | null;
+  category: string | null;
+  chains: string[];
+  tvl_usd: number;
+  mcap_usd: number;
+  multiple: number;
+  token_status: 'unissued_snapshot' | 'issued' | 'issued_no_mcap' | 'uncertain';
+}
+
 export interface RadarData {
   as_of: string;
   source: string;
@@ -134,12 +154,21 @@ export interface RadarData {
   watchlist_size: number;
   board_size: number;
   early_size: number;
+  live_size: number;
   stability_note: string;
+  bootstrap_replicates: number;
+  bootstrap_p_low: number;
+  bootstrap_p_high: number;
+  model_rank_variants: string[];
   spearman: SpearmanData;
   model: RadarModel;
   backtest: Backtest;
+  baselines: { name: string; backtest: Backtest }[];
+  ablations: { name: string; median_log_err: number; band_coverage: number }[];
   calibration: Calibration;
+  ledger: { issued_with_mcap: number; issued_no_mcap: number; unissued_listed: number; unissued_unlisted: number; total: number };
   rows: RowLite[];
+  live: LiveRow[];
   heatmap: HeatmapCell[];
   assumptions: string[];
 }
@@ -256,6 +285,23 @@ const MS_PER_DAY = 86_400_000;
 const CAT_NULL = '\u0000null-category';
 
 const isListed = (p: SnapshotProtocol): boolean => p.gecko_id !== null || p.symbol !== null;
+
+export function tokenStatus(p: SnapshotProtocol): 'unissued_snapshot' | 'issued' | 'issued_no_mcap' | 'uncertain' {
+  const hasRecord = p.gecko_id !== null || p.symbol !== null;
+  if (!hasRecord) return 'unissued_snapshot';
+  if (p.mcap_usd !== null) return 'issued';
+  return 'issued_no_mcap';
+}
+
+export function earlyExclusionReason(p: SnapshotProtocol, floorUsd: number): string {
+  if (VERSIONED.test(p.name)) return '名称含版本号';
+  if (isExcludedCategory(p.category)) return '排除类别';
+  if (WRAPPED_WORD.test(p.name)) return 'wrapped/staked';
+  if (EXCHANGE_PREFIX.some((prefix) => p.name.startsWith(prefix))) return '交易所前缀';
+  if (p.tvl_usd >= floorUsd) return 'TVL达到或超过地板';
+  if (p.gecko_id !== null || p.symbol !== null) return '已有代币记录';
+  return '未满足早期候选条件';
+}
 const categoryKey = (category: string | null): string => category ?? CAT_NULL;
 const categoryName = (key: string): string => (key === CAT_NULL ? 'Uncategorized' : key);
 const isExcludedCategory = (category: string | null): boolean => category !== null && EXCLUDED_CATEGORY.has(category);
@@ -460,7 +506,18 @@ function rSquared(rows: readonly FitRow[], predict: (row: FitRow) => number): nu
  * `ageFallbackDays`; winsor bounds and every effect are recomputed from `fit` alone, which is what
  * the shadow backtest needs.
  */
-function fitModel(fit: readonly SnapshotProtocol[], asOfMs: number, ageFallbackDays: number): ModelFit {
+interface FitOptions {
+  includeAge?: boolean;
+  includeCategory?: boolean;
+  includeChain?: boolean;
+  includeMomentum?: boolean;
+}
+
+function fitModel(fit: readonly SnapshotProtocol[], asOfMs: number, ageFallbackDays: number, options: FitOptions = {}): ModelFit {
+  const includeAge = options.includeAge !== false;
+  const includeCategory = options.includeCategory !== false;
+  const includeChain = options.includeChain !== false;
+  const includeMomentum = options.includeMomentum !== false;
   const changes = fit.filter((p) => p.change_7d !== null).map((p) => p.change_7d as number);
   const winsorLo = changes.length === 0 ? 0 : quantile(changes, 0.05);
   const winsorHi = changes.length === 0 ? 0 : quantile(changes, 0.95);
@@ -479,55 +536,69 @@ function fitModel(fit: readonly SnapshotProtocol[], asOfMs: number, ageFallbackD
   // 1. Robust global regression on the age-fit subset.
   const ageRows = rows.filter((r) => r.p.listed_at !== null);
   const regressionRows = ageRows.length >= 3 ? ageRows : rows;
-  const X = regressionRows.map((r) => [1, r.L, r.A]);
+  const X = regressionRows.map((r) => (includeAge ? [1, r.L, r.A] : [1, r.L]));
   const y = regressionRows.map((r) => r.y);
-  const [a, b, c] = huberIRLS(X, y);
+  const beta = huberIRLS(X, y);
+  const a = beta[0] ?? 0;
+  const b = beta[1] ?? 0;
+  const c = includeAge ? (beta[2] ?? 0) : 0;
 
-  const pred1 = (r: FitRow): number => a! + b! * r.L + c! * r.A;
+  const pred1 = (r: FitRow): number => a + b * r.L + (includeAge ? c * r.A : 0);
 
   // 2. Category effects, empirical-Bayes shrunk with k=5.
   const catResiduals = new Map<string, number[]>();
-  for (const r of rows) {
-    const key = categoryKey(r.p.category);
-    const list = catResiduals.get(key);
-    const residual = r.y - pred1(r);
-    if (list === undefined) catResiduals.set(key, [residual]);
-    else list.push(residual);
+  if (includeCategory) {
+    for (const r of rows) {
+      const key = categoryKey(r.p.category);
+      const list = catResiduals.get(key);
+      const residual = r.y - pred1(r);
+      if (list === undefined) catResiduals.set(key, [residual]);
+      else list.push(residual);
+    }
   }
   const catEffect = new Map<string, number>();
-  for (const [key, values] of catResiduals) {
-    const n = values.length;
-    catEffect.set(key, (n / (n + 5)) * meanOf(values));
+  if (includeCategory) {
+    for (const [key, values] of catResiduals) {
+      const n = values.length;
+      catEffect.set(key, (n / (n + 5)) * meanOf(values));
+    }
   }
   const catEffectOf = (r: FitRow): number => catEffect.get(categoryKey(r.p.category)) ?? 0;
 
   // 3. Chain effects, only chains with n >= 5; empirical-Bayes k=10.
   const chainResiduals = new Map<string, number[]>();
-  for (const r of rows) {
-    const residual = r.y - pred1(r) - catEffectOf(r);
-    for (const chain of r.p.chains) {
-      const list = chainResiduals.get(chain);
-      if (list === undefined) chainResiduals.set(chain, [residual]);
-      else list.push(residual);
+  if (includeChain) {
+    for (const r of rows) {
+      const residual = r.y - pred1(r) - catEffectOf(r);
+      for (const chain of r.p.chains) {
+        const list = chainResiduals.get(chain);
+        if (list === undefined) chainResiduals.set(chain, [residual]);
+        else list.push(residual);
+      }
     }
   }
   const chainEffect = new Map<string, number>();
-  for (const [chain, values] of chainResiduals) {
-    const n = values.length;
-    if (n >= 5) chainEffect.set(chain, (n / (n + 10)) * meanOf(values));
+  if (includeChain) {
+    for (const [chain, values] of chainResiduals) {
+      const n = values.length;
+      if (n >= 5) chainEffect.set(chain, (n / (n + 10)) * meanOf(values));
+    }
   }
   const chainEffectOf = (r: FitRow): number => chainContribution(chainEffect, r.p.chains);
 
   // 4. Momentum coefficient, no intercept, on rows with a recorded 7-day change.
-  let numerator = 0;
-  let denominator = 0;
-  for (const r of rows) {
-    if (r.p.change_7d === null) continue;
-    const residual = r.y - pred1(r) - catEffectOf(r) - chainEffectOf(r);
-    numerator += r.M * residual;
-    denominator += r.M * r.M;
+  let d = 0;
+  if (includeMomentum) {
+    let numerator = 0;
+    let denominator = 0;
+    for (const r of rows) {
+      if (r.p.change_7d === null) continue;
+      const residual = r.y - pred1(r) - catEffectOf(r) - chainEffectOf(r);
+      numerator += r.M * residual;
+      denominator += r.M * r.M;
+    }
+    d = denominator === 0 ? 0 : numerator / denominator;
   }
-  const d = denominator === 0 ? 0 : numerator / denominator;
 
   // 5. Fitted log10 prediction.
   const logpred = (r: FitRow): number => pred1(r) + catEffectOf(r) + chainEffectOf(r) + d * r.M;
@@ -566,6 +637,88 @@ function fitModel(fit: readonly SnapshotProtocol[], asOfMs: number, ageFallbackD
     catTriple,
     globalTriple,
     globalR2: rSquared(rows, logpred),
+  };
+}
+
+/** Baseline B: category median of log10 mcap (global median fallback). */
+function fitCategoryMedian(fit: readonly SnapshotProtocol[], asOfMs: number, ageFallbackDays: number): ModelFit {
+  const rows = fit.map((p) => ({
+    p,
+    y: Math.log10(p.mcap_usd as number),
+  }));
+  const byCat = new Map<string, number[]>();
+  for (const r of rows) {
+    const key = categoryKey(r.p.category);
+    const list = byCat.get(key);
+    if (list === undefined) byCat.set(key, [r.y]);
+    else list.push(r.y);
+  }
+  const catMedian = new Map<string, number>();
+  for (const [key, values] of byCat) {
+    catMedian.set(key, quantile(values, 0.5));
+  }
+  const globalMedian = rows.length === 0 ? 0 : quantile(rows.map((r) => r.y), 0.5);
+  const catEffect = new Map<string, number>();
+  for (const key of byCat.keys()) {
+    catEffect.set(key, catMedian.get(key) ?? globalMedian);
+  }
+  // ensure all categories present
+  // prediction log = catEffect value (a=0)
+  const logpred = (r: { p: SnapshotProtocol }): number => catEffect.get(categoryKey(r.p.category)) ?? globalMedian;
+
+  const residuals = rows.map((r) => r.y - logpred(r));
+  const globalTriple: [number, number, number] = [
+    quantile(residuals, 0.25),
+    quantile(residuals, 0.5),
+    quantile(residuals, 0.75),
+  ];
+  const catN = new Map<string, number>();
+  const catR2 = new Map<string, number>();
+  const catTriple = new Map<string, [number, number, number]>();
+  for (const [key, values] of byCat) {
+    catN.set(key, values.length);
+    const catRows = rows.filter((r) => categoryKey(r.p.category) === key);
+    const catResiduals = catRows.map((r) => r.y - (catEffect.get(key) ?? globalMedian));
+    if (values.length >= 5) {
+      catTriple.set(key, [quantile(catResiduals, 0.25), quantile(catResiduals, 0.5), quantile(catResiduals, 0.75)]);
+    }
+    // r2 vs mean
+    const mean = meanOf(catRows.map((r) => r.y));
+    let ssres = 0;
+    let sstot = 0;
+    for (const r of catRows) {
+      const pred = catEffect.get(key) ?? globalMedian;
+      ssres += (r.y - pred) ** 2;
+      sstot += (r.y - mean) ** 2;
+    }
+    catR2.set(key, sstot === 0 ? 0 : 1 - ssres / sstot);
+  }
+  const globalR2 = (() => {
+    const mean = meanOf(rows.map((r) => r.y));
+    let ssres = 0;
+    let sstot = 0;
+    for (const r of rows) {
+      const pred = catEffect.get(categoryKey(r.p.category)) ?? globalMedian;
+      ssres += (r.y - pred) ** 2;
+      sstot += (r.y - mean) ** 2;
+    }
+    return sstot === 0 ? 0 : 1 - ssres / sstot;
+  })();
+
+  return {
+    a: 0,
+    b: 0,
+    c: 0,
+    d: 0,
+    winsorLo: 0,
+    winsorHi: 0,
+    catEffect,
+    chainEffect: new Map(),
+    catN,
+    catR2,
+    catTriple,
+    globalTriple,
+    globalR2,
   };
 }
 
@@ -847,6 +1000,117 @@ function deriveBandScale(run: BacktestRun): number {
   return empiricalWidth / modelWidth;
 }
 
+// ---------------------------------------------------------------- cross-fitted backtest
+
+function fitForKind(
+  kind: 'full' | 'tvl' | 'catmedian',
+  fit: readonly SnapshotProtocol[],
+  asOfMs: number,
+  fallback: number,
+  fitOptions?: FitOptions,
+): ModelFit {
+  if (kind === 'full') return fitModel(fit, asOfMs, fallback, fitOptions);
+  if (kind === 'tvl') {
+    return fitModel(fit, asOfMs, fallback, {
+      includeAge: false,
+      includeCategory: false,
+      includeChain: false,
+      includeMomentum: false,
+      ...(fitOptions ?? {}),
+    });
+  }
+  return fitCategoryMedian(fit, asOfMs, fallback);
+}
+
+function inSampleScale(model: ModelFit, train: readonly SnapshotProtocol[], asOfMs: number, fallback: number): number {
+  const residuals: number[] = [];
+  const widths: number[] = [];
+  for (const p of train) {
+    if (p.mcap_usd === null || p.mcap_usd <= 0) continue;
+    const age = ageDaysOf(p, asOfMs) ?? fallback;
+    const L = Math.log10(Math.max(p.tvl_usd, 1));
+    const A = Math.log10(age + 1);
+    const M = momentumOf(p.change_7d, model.winsorLo, model.winsorHi);
+    const logpred = predictLog(model, p.category, p.chains, L, A, M);
+    const [q25, q50, q75] = calibratedTripleOf(model, p.category, 1);
+    const real = p.mcap_usd as number;
+    residuals.push(Math.log10(real) - (logpred + q50));
+    widths.push(q50 - q25 + (q75 - q50));
+  }
+  if (residuals.length === 0) return 1;
+  const empiricalWidth = quantile(residuals, 0.75) - quantile(residuals, 0.25);
+  const modelWidth = meanOf(widths);
+  if (!(modelWidth > 1e-9) || !Number.isFinite(empiricalWidth)) return 1;
+  return empiricalWidth / modelWidth;
+}
+
+function crossFitBacktest(
+  fit: readonly SnapshotProtocol[],
+  snapshot: Snapshot,
+  asOfMs: number,
+  ageFallbackDays: number,
+  kind: 'full' | 'tvl' | 'catmedian',
+  forceScale?: number,
+  fitOptions?: FitOptions,
+): { metrics: Backtest; residuals: number[]; lowerGaps: number[]; upperGaps: number[]; scales: number[] } {
+  const rng = mulberry32(fnv1a(snapshot.as_of));
+  const order = shuffled(fit, rng);
+  const K = 5;
+  const foldSize = Math.ceil(order.length / K);
+  const folds: SnapshotProtocol[][] = [];
+  for (let i = 0; i < K; i++) folds.push(order.slice(i * foldSize, (i + 1) * foldSize));
+
+  const allErrors: number[] = [];
+  const allResiduals: number[] = [];
+  const allLower: number[] = [];
+  const allUpper: number[] = [];
+  let covered = 0;
+  let total = 0;
+  const scales: number[] = [];
+
+  for (let fi = 0; fi < K; fi++) {
+    const held = folds[fi]!;
+    const train = folds.flatMap((f, idx) => (idx === fi ? [] : f));
+    const trainAges = train.map((p) => ageDaysOf(p, asOfMs)).filter((a): a is number => a !== null);
+    const trainFallback = trainAges.length > 0 ? quantile(trainAges, 0.5) : ageFallbackDays;
+    const model = fitForKind(kind, train, asOfMs, trainFallback, fitOptions);
+    const scale = forceScale !== undefined ? forceScale : inSampleScale(model, train, asOfMs, trainFallback);
+    if (forceScale === undefined) scales.push(scale);
+
+    for (const p of held) {
+      if (p.mcap_usd === null || p.mcap_usd <= 0) continue;
+      const age = ageDaysOf(p, asOfMs) ?? trainFallback;
+      const L = Math.log10(Math.max(p.tvl_usd, 1));
+      const A = Math.log10(age + 1);
+      const M =
+        kind === 'full' ? momentumOf(p.change_7d, model.winsorLo, model.winsorHi) : 0;
+      const logpred = predictLog(model, p.category, p.chains, L, A, M);
+      const [q25, q50, q75] = calibratedTripleOf(model, p.category, scale);
+      const point = 10 ** (logpred + q50);
+      const lo = 10 ** (logpred + q25);
+      const hi = 10 ** (logpred + q75);
+      const real = p.mcap_usd as number;
+      const err = Math.log10(point / real);
+      allErrors.push(err);
+      allResiduals.push(Math.log10(real) - (logpred + q50));
+      allLower.push(q50 - q25);
+      allUpper.push(q75 - q50);
+      if (real >= lo && real <= hi) covered++;
+      total++;
+    }
+  }
+
+  const metrics: Backtest = {
+    n: total,
+    median_log_err: round4(quantile(allErrors, 0.5)),
+    q25_log_err: round4(quantile(allErrors, 0.25)),
+    q75_log_err: round4(quantile(allErrors, 0.75)),
+    within_3x_share: round4(allErrors.filter((e) => Math.abs(e) <= 0.5).length / (allErrors.length || 1)),
+    band_coverage: round4(covered / (total || 1)),
+  };
+  return { metrics, residuals: allResiduals, lowerGaps: allLower, upperGaps: allUpper, scales };
+}
+
 // ---------------------------------------------------------------- the build
 
 interface RowSeed {
@@ -871,6 +1135,28 @@ interface RowSeed {
   zMom: number;
 }
 
+/** Live-token protocols: those carrying a market cap, sorted by mcap descending. They are displayed as
+ *  calibration samples (comps) and never mixed into the ranked board. */
+function liveRows(snapshot: Snapshot): LiveRow[] {
+  const rows: LiveRow[] = [];
+  for (const p of snapshot.protocols) {
+    if (p.mcap_usd === null || p.mcap_usd <= 0) continue;
+    rows.push({
+      slug: p.slug,
+      name: p.name,
+      symbol: p.symbol,
+      category: p.category,
+      chains: [...p.chains],
+      tvl_usd: p.tvl_usd,
+      mcap_usd: p.mcap_usd,
+      multiple: round4(p.mcap_usd / Math.max(p.tvl_usd, 1)),
+      token_status: tokenStatus(p),
+    });
+  }
+  rows.sort((a, b) => b.mcap_usd - a.mcap_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  return rows;
+}
+
 /** Assemble the board and the dashboard payload. Farm steps are deliberately not part of this layer. */
 export function buildRadar(snapshot: Snapshot): RadarResult {
   const asOfMs = Date.parse(snapshot.as_of);
@@ -881,6 +1167,7 @@ export function buildRadar(snapshot: Snapshot): RadarResult {
     (p) => !watchlistSet.has(p.slug) && isEarlyCandidate(p, snapshot.floor_usd),
   );
   const boardProtocols = [...watchlistProtocols, ...earlyProtocols].sort((a, b) => cmpStr(a.slug, b.slug));
+  const live = liveRows(snapshot);
 
   const boardAges = boardProtocols
     .map((p) => ageDaysOf(p, asOfMs))
@@ -891,19 +1178,35 @@ export function buildRadar(snapshot: Snapshot): RadarResult {
   const fit = fitSample(snapshot);
   const model = fitModel(fit, asOfMs, medianAgeDays);
 
-  // Calibration is fitted from held-out backtest residuals, then the shadow backtest is rerun with
-  // the calibrated bands. `before` is the uncalibrated coverage, `after` the one actually shipped.
-  const uncalibrated = runBacktest(fit, snapshot, asOfMs, medianAgeDays, 1);
-  const bandScale = deriveBandScale(uncalibrated);
-  const calibrated = runBacktest(fit, snapshot, asOfMs, medianAgeDays, bandScale);
-  const backtest = calibrated.metrics;
+  // Cross-fitted (K=5) out-of-fold backtest: fit+calibrate on 4 folds, evaluate on the held fold.
+  const uncalibratedOof = crossFitBacktest(fit, snapshot, asOfMs, medianAgeDays, 'full', 1);
+  const calibratedOof = crossFitBacktest(fit, snapshot, asOfMs, medianAgeDays, 'full');
+  const scales = calibratedOof.scales;
+  const bandScale = scales.length > 0 ? quantile(scales, 0.5) : 1;
+  const backtest = calibratedOof.metrics;
   const calibration: Calibration = {
     coefficient: round4(bandScale),
-    before_coverage: uncalibrated.metrics.band_coverage,
-    after_coverage: calibrated.metrics.band_coverage,
+    before_coverage: uncalibratedOof.metrics.band_coverage,
+    after_coverage: calibratedOof.metrics.band_coverage,
     method:
-      '留出影子回测残差的 IQR ÷ 训练残差 P25–P75 带内宽（两缺口之和的均值）；只缩放带宽，点估计与中位偏移不动。',
+      'K=5 折 out-of-fold：每折用其余 4 折拟合并以训练折残差校准带宽，在本折评估；汇总 OOF 覆盖率与中位对数误差。',
   };
+
+  // Baselines on the same folds.
+  const tvlBaseline = crossFitBacktest(fit, snapshot, asOfMs, medianAgeDays, 'tvl').metrics;
+  const catMedianBaseline = crossFitBacktest(fit, snapshot, asOfMs, medianAgeDays, 'catmedian').metrics;
+  const baselines = [
+    { name: '基线 A · 纯 TVL', backtest: tvlBaseline },
+    { name: '基线 B · 类别中位数', backtest: catMedianBaseline },
+  ];
+
+  // Ablations (OOF median log error change).
+  const noMomentum = crossFitBacktest(fit, snapshot, asOfMs, medianAgeDays, 'full', undefined, { includeMomentum: false }).metrics;
+  const noAge = crossFitBacktest(fit, snapshot, asOfMs, medianAgeDays, 'full', undefined, { includeAge: false }).metrics;
+  const ablations = [
+    { name: '去掉动量', median_log_err: noMomentum.median_log_err, band_coverage: noMomentum.band_coverage },
+    { name: '去掉年龄', median_log_err: noAge.median_log_err, band_coverage: noAge.band_coverage },
+  ];
 
   // Sorted momentum inputs for the propensity axis.
   const boardMomentum = boardProtocols.map((p) => ({
@@ -988,10 +1291,85 @@ export function buildRadar(snapshot: Snapshot): RadarResult {
 
   seeds.sort((a, b) => b.implied - a.implied || cmpStr(a.p.slug, b.p.slug));
 
+  // ---------------------------------------------------------------- bootstrap rank stability (seeded)
+  const BOOTSTRAP_REPLICATES = 200;
+  const bootstrapRng = mulberry32(fnv1a(snapshot.as_of + '|bootstrap-ranks'));
+  const anchorSample = fitSample(snapshot);
+  const rankHistory = new Map<string, number[]>(boardProtocols.map((p) => [p.slug, []]));
+  for (let rep = 0; rep < BOOTSTRAP_REPLICATES; rep++) {
+    const sample: SnapshotProtocol[] = [];
+    for (let i = 0; i < anchorSample.length; i++) {
+      sample.push(anchorSample[Math.floor(bootstrapRng() * anchorSample.length)]!);
+    }
+    const repAges = sample.map((p) => ageDaysOf(p, asOfMs)).filter((a): a is number => a !== null);
+    const repFallback = repAges.length > 0 ? quantile(repAges, 0.5) : medianAgeDays;
+    const repModel = fitModel(sample, asOfMs, repFallback);
+    const variant = boardProtocols.map((p) => {
+      const ageDays = ageDaysOf(p, asOfMs);
+      const effectiveAge = ageDays ?? repFallback;
+      const L = Math.log10(Math.max(p.tvl_usd, 1));
+      const A = Math.log10(effectiveAge + 1);
+      const M = momentumOf(p.change_7d, repModel.winsorLo, repModel.winsorHi);
+      const logpred = predictLog(repModel, p.category, p.chains, L, A, M);
+      const q50 = calibratedTripleOf(repModel, p.category, 1)[1];
+      const implied = Math.max(1, Math.round(10 ** (logpred + q50)));
+      return { slug: p.slug, implied };
+    });
+    const ranks = descendingSlugRanks(variant, (v) => v.implied);
+    for (const p of boardProtocols) {
+      const r = ranks.get(p.slug);
+      if (r !== undefined) rankHistory.get(p.slug)!.push(r);
+    }
+  }
+  const rankP10 = new Map<string, number>();
+  const rankP90 = new Map<string, number>();
+  for (const p of boardProtocols) {
+    const arr = (rankHistory.get(p.slug) ?? []).slice().sort((a, b) => a - b);
+    rankP10.set(p.slug, Math.max(1, Math.round(quantile(arr, 0.1))));
+    rankP90.set(p.slug, Math.max(1, Math.round(quantile(arr, 0.9))));
+  }
+
+  // ---------------------------------------------------------------- three-model median rank
+  const modelVariantRanks = new Map<string, number[]>();
+  for (const p of boardProtocols) modelVariantRanks.set(p.slug, []);
+  const variantSpecs: { kind: 'full' | 'tvl' | 'catmedian'; options?: FitOptions }[] = [
+    { kind: 'full' },
+    { kind: 'catmedian' },
+    { kind: 'full', options: { includeAge: false, includeMomentum: false } },
+  ];
+  for (const spec of variantSpecs) {
+    const m =
+      spec.kind === 'catmedian'
+        ? fitCategoryMedian(fit, asOfMs, medianAgeDays)
+        : fitModel(fit, asOfMs, medianAgeDays, spec.options);
+    const variant = boardProtocols.map((p) => {
+      const ageDays = ageDaysOf(p, asOfMs);
+      const effectiveAge = ageDays ?? medianAgeDays;
+      const L = Math.log10(Math.max(p.tvl_usd, 1));
+      const A = Math.log10(effectiveAge + 1);
+      const M = spec.kind === 'full' && !spec.options ? momentumOf(p.change_7d, m.winsorLo, m.winsorHi) : 0;
+      const logpred = predictLog(m, p.category, p.chains, L, A, M);
+      const q50 = calibratedTripleOf(m, p.category, 1)[1];
+      const implied = Math.max(1, Math.round(10 ** (logpred + q50)));
+      return { slug: p.slug, implied };
+    });
+    const ranks = descendingSlugRanks(variant, (v) => v.implied);
+    for (const p of boardProtocols) {
+      const r = ranks.get(p.slug);
+      if (r !== undefined) modelVariantRanks.get(p.slug)!.push(r);
+    }
+  }
+  const medianModelRank = new Map<string, number>();
+  for (const p of boardProtocols) {
+    const arr = (modelVariantRanks.get(p.slug) ?? []).slice().sort((a, b) => a - b);
+    medianModelRank.set(p.slug, Math.max(1, Math.round(quantile(arr, 0.5))));
+  }
+
   const bandRatios = seeds.map((s) => s.bandHi / Math.max(s.bandLo, 1));
   const wideRatio = quantile(bandRatios, 0.75);
   const boardMedianTvl = quantile(boardProtocols.map((p) => p.tvl_usd), 0.5);
 
+  const tvlRankMap = descendingSlugRanks(seeds.map((s) => ({ slug: s.p.slug, tvl_usd: s.p.tvl_usd })), (x) => x.tvl_usd);
   const board: BoardRow[] = seeds.map((s, i) => {
     const reasons: string[] = [];
     const lowCategory = s.categoryN < 5;
@@ -1024,6 +1402,14 @@ export function buildRadar(snapshot: Snapshot): RadarResult {
       crowding: s.crowding,
       comps: s.comps,
       factors: s.factors,
+      token_status: tokenStatus(s.p),
+      tvl_rank: tvlRankMap.get(s.p.slug) ?? i + 1,
+      rank_p10: rankP10.get(s.p.slug) ?? i + 1,
+      rank_p90: rankP90.get(s.p.slug) ?? i + 1,
+      rank_lo: rankP10.get(s.p.slug) ?? i + 1,
+      rank_hi: rankP90.get(s.p.slug) ?? i + 1,
+      median_model_rank: medianModelRank.get(s.p.slug) ?? i + 1,
+      rank_median_models: medianModelRank.get(s.p.slug) ?? i + 1,
     };
   });
 
@@ -1113,6 +1499,27 @@ export function buildRadar(snapshot: Snapshot): RadarResult {
       };
     });
 
+  const boardSlugSet = new Set(board.map((r) => r.slug));
+  let issuedWithMcap = 0;
+  let issuedNoMcap = 0;
+  let unissuedListed = 0;
+  let unissuedUnlisted = 0;
+  for (const p of snapshot.protocols) {
+    const listed = isListed(p);
+    const hasMcap = p.mcap_usd !== null;
+    if (listed && hasMcap) issuedWithMcap++;
+    else if (listed && !hasMcap) issuedNoMcap++;
+    else if (!listed && boardSlugSet.has(p.slug)) unissuedListed++;
+    else if (!listed && !boardSlugSet.has(p.slug)) unissuedUnlisted++;
+  }
+  const ledger = {
+    issued_with_mcap: issuedWithMcap,
+    issued_no_mcap: issuedNoMcap,
+    unissued_listed: unissuedListed,
+    unissued_unlisted: unissuedUnlisted,
+    total: snapshot.protocols.length,
+  };
+
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -1120,7 +1527,12 @@ export function buildRadar(snapshot: Snapshot): RadarResult {
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: earlyProtocols.length,
+    live_size: live.length,
     stability_note: stabilityNote,
+    bootstrap_replicates: BOOTSTRAP_REPLICATES,
+    bootstrap_p_low: 10,
+    bootstrap_p_high: 90,
+    model_rank_variants: ['现模型', '类别中位数 comps', '去动量与年龄的基准'],
     spearman: { rho, top10 },
     model: {
       a: round4(model.a),
@@ -1133,9 +1545,13 @@ export function buildRadar(snapshot: Snapshot): RadarResult {
       categories,
     },
     backtest,
+    baselines,
+    ablations,
     calibration,
     rows: board,
+    live,
     heatmap,
+    ledger,
     assumptions: [
       'listed_at 是 DefiLlama 收录日，不是协议上线日；缺失时以榜单有收录日协议的中位年龄代入并披露。',
       'mcap_usd 为流通市值口径，不是 FDV；市值非正的记录视为缺失，不进入拟合。',

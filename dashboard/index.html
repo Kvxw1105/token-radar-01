@@ -16,6 +16,9 @@
     <p class="sub">快照 <span class="num" id="asof"></span> · 市值地板 <span class="num" id="floor"></span> · <span id="hcounts"></span></p>
   </header>
 
+  <!-- Three-lane banner: full universe → issued comparison → unrecorded → listed. -->
+  <div class="banner" id="banner"></div>
+
   <!-- Hero conclusion bar: always the first thing a reader sees. -->
   <section class="hero">
     <div class="hero-top"><span class="badge acc" id="hbadge"></span></div>
@@ -31,7 +34,12 @@
 
   <section>
     <h2>榜单 <span class="badge acc num" id="wbadge"></span></h2>
-    <div class="controls">
+    <div class="tabs" id="tabs">
+      <button type="button" data-tab="pre" class="on">未发币雷达（<span class="num" id="tc-pre"></span>）</button>
+      <button type="button" data-tab="live">已发币对照（<span class="num" id="tc-live"></span>）</button>
+    </div>
+    <p class="live-note" id="live-note" hidden>这些协议已在交易，不参与排名，仅作为估值模型的校准样本（comps）。</p>
+    <div class="controls" id="pre-controls">
       <div class="sorts" id="sorts"><span class="lbl">排序：</span>
         <button type="button" data-k="implied" class="on">隐含估值</button>
         <button type="button" data-k="tvl">TVL</button>
@@ -51,17 +59,25 @@
       </select>
       <span class="cnt num" id="count"></span>
     </div>
-    <div class="board">
+    <div class="board" id="boardwrap">
       <div class="twrap">
         <table class="ltable">
           <thead><tr>
-            <th>名次</th><th>协议</th><th>类别</th><th>链数</th><th>TVL</th><th>7日</th>
-            <th>隐含估值（P25–P75）</th><th>置信</th><th>拥挤度</th>
+            <th>名次</th><th>协议</th><th>类别</th><th>状态</th><th>链数</th><th>TVL</th><th>7日</th>
+            <th>隐含估值（P25–P75）</th><th>置信</th><th>拥挤度</th><th>vs TVL</th>
           </tr></thead>
           <tbody id="tbody"></tbody>
         </table>
       </div>
       <aside class="detail" id="detail" aria-live="polite"></aside>
+    </div>
+    <div class="twrap" id="livewrap" hidden>
+      <table class="ltable">
+        <thead><tr>
+          <th>名称 / Symbol</th><th>类别</th><th>TVL</th><th>市值</th><th>市值/TVL</th>
+        </tr></thead>
+        <tbody id="livebody"></tbody>
+      </table>
     </div>
   </section>
 
@@ -72,9 +88,9 @@
   </section>
 
   <section>
-    <h2>组合 · 贪心构建：预期空投 ÷ 成本，构建时预计算</h2>
+    <h2>组合 · 贪心构建：预期市值暴露 ÷ 成本，构建时预计算</h2>
     <div class="cards" id="cards"></div>
-    <p class="disc">非投资建议：份额与空投区间为公式推演，不构成承诺。</p>
+    <p class="disc">非投资建议：份额与市值暴露参考为公式推演，不构成承诺。</p>
   </section>
 
   <section>
